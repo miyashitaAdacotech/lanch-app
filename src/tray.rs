@@ -331,14 +331,43 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| parse_hotkey(&default_format))
         .ok_or_else(|| format!("Markdown整形ホットキーの形式が不正です: {}", format_spec))?;
 
-    hotkey_manager.register(hk_popup)?;
-    hotkey_manager.register(hk_selected)?;
-    hotkey_manager.register(hk_format)?;
+    // ホットキー登録（競合時はスキップして警告）
+    let popup_registered = match hotkey_manager.register(hk_popup) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}", popup_spec, e);
+            false
+        }
+    };
+    let selected_registered = match hotkey_manager.register(hk_selected) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}", selected_spec, e);
+            false
+        }
+    };
+    let format_registered = match hotkey_manager.register(hk_format) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}", format_spec, e);
+            false
+        }
+    };
 
-    println!("Quick Tools がシステムトレイで起動しました");
-    println!("  {}: 翻訳ポップアップを開く", popup_spec);
-    println!("  {}: 選択テキストを翻訳", selected_spec);
-    println!("  {}: 選択テキストをMarkdown整形", format_spec);
+    if !popup_registered && !selected_registered && !format_registered {
+        return Err("全てのホットキーの登録に失敗しました。他のアプリ（quick_translate.ahk 等）を終了してから再起動してください".into());
+    }
+
+    println!("Lanch App がシステムトレイで起動しました");
+    if popup_registered {
+        println!("  {}: 翻訳ポップアップを開く", popup_spec);
+    }
+    if selected_registered {
+        println!("  {}: 選択テキストを翻訳", selected_spec);
+    }
+    if format_registered {
+        println!("  {}: 選択テキストをMarkdown整形", format_spec);
+    }
 
     // ANTHROPIC_API_KEY 環境変数をチェック
     let has_env_key = std::env::var("ANTHROPIC_API_KEY")
