@@ -135,12 +135,17 @@ fn call_claude_api(
     if !status.is_success() {
         let error_body = response.text().unwrap_or_default();
         // ステータスコード別のわかりやすいメッセージ
-        let user_msg = match status.as_u16() {
-            401 => "APIキーが無効です。正しいキーを設定してください",
-            403 => "APIアクセスが拒否されました。キーの権限を確認してください",
-            429 => "APIレート制限に達しました。しばらく待ってから再試行してください",
-            500..=599 => "APIサーバーエラー。しばらく待ってから再試行してください",
-            _ => "APIエラー",
+        let user_msg = if error_body.contains("credit balance is too low") {
+            "クレジット残高不足。console.anthropic.com でチャージしてください"
+        } else {
+            match status.as_u16() {
+                400 => "リクエストエラー。設定を確認してください",
+                401 => "APIキーが無効です。正しいキーを設定してください",
+                403 => "APIアクセスが拒否されました。キーの権限を確認してください",
+                429 => "APIレート制限に達しました。しばらく待ってから再試行してください",
+                500..=599 => "APIサーバーエラー。しばらく待ってから再試行してください",
+                _ => "APIエラー",
+            }
         };
         eprintln!("[format] API エラー詳細 ({}): {}", status, error_body);
         return Err(format!("{} ({})", user_msg, status).into());
