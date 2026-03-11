@@ -1,14 +1,19 @@
-// formatter.rs - Claude API によるMarkdown整形
+// formatter.rs - Claude Code CLI によるMarkdown整形
 //
-// 選択テキストを Anthropic Claude API に送信し、
+// 選択テキストを Claude Code CLI (`claude -p`) に送信し、
 // Markdown形式に整形して返す。
+//
+// Max Plan のサブスクリプション枠を使用するため、
+// 別途 API キーやクレジット購入は不要。
 //
 // フロー:
 //   1. ホットキー (Ctrl+Shift+F) で選択テキストをコピー
-//   2. Claude API に整形リクエストを送信
+//   2. Claude CLI にパイプで整形リクエストを送信
 //   3. 整形結果をクリップボードにコピー
 
 use crate::config::Config;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 /// 整形結果を格納する構造体
 #[derive(Debug, Clone)]
@@ -34,36 +39,18 @@ const FORMAT_SYSTEM_PROMPT: &str = r#"あなたはテキスト整形の専門家
 - JSON、YAML、XML等の構造化データはコードブロックで整形する
 - ログ出力やスタックトレースはコードブロック（text or log）で整形する"#;
 
-/// Claude API キーを取得する
+/// Claude Code CLI を使ってテキストをMarkdown整形する
 ///
-/// 優先順位:
-/// 1. 環境変数 `ANTHROPIC_API_KEY`
-/// 2. config.json の `claude_api_key`
-fn resolve_api_key(config: &Config) -> Result<String, Box<dyn std::error::Error>> {
-    // 環境変数を最優先
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        if !key.trim().is_empty() {
-            return Ok(key.trim().to_string());
-        }
-    }
-
-    // config.json のフォールバック
-    if !config.claude_api_key.is_empty() {
-        return Ok(config.claude_api_key.clone());
-    }
-
-    Err("APIキー未設定。ANTHROPIC_API_KEY 環境変数を設定してください".into())
-}
-
-/// Claude API を使ってテキストをMarkdown整形する
+/// `claude -p --model <model> --system-prompt <prompt>` で呼び出し、
+/// stdin にテキストを流して stdout から結果を受け取る。
 ///
 /// # 引数
 /// - `text`: 整形するテキスト
-/// - `config`: アプリケーション設定（APIキー等）
+/// - `config`: アプリケーション設定（モデル名等）
 ///
 /// # 戻り値
 /// - `Ok(FormatResult)`: 整形結果
-/// - `Err(...)`: APIエラー
+/// - `Err(...)`: CLI実行エラー
 pub fn format_markdown(text: &str, config: &Config) -> Result<FormatResult, Box<dyn std::error::Error>> {
     let text = text.trim();
     if text.is_empty() {
@@ -72,101 +59,109 @@ pub fn format_markdown(text: &str, config: &Config) -> Result<FormatResult, Box<
         });
     }
 
-    let api_key = resolve_api_key(config)?;
-    let formatted = call_claude_api(text, &api_key, &config.claude_model)?;
+    let formatted = call_claude_cli(text, &config.claude_model)?;
 
     Ok(FormatResult { formatted })
 }
 
-/// Anthropic Messages API を呼び出す
+/// Claude Code CLI が利用可能か確認する
+pub fn check_cli_available() -> bool {
+    Command::new("claude")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Claude Code CLI を呼び出してテキストを整形する
 ///
-/// エンドポイント: https://api.anthropic.com/v1/messages
+/// コマンド:
+///   echo <text> | claude -p --model <model> --system-prompt <prompt>
 ///
-/// リクエスト形式:
-/// {
-///   "model": "claude-sonnet-4-20250514",
-///   "max_tokens": 4096,
-///   "system": "...",
-///   "messages": [{"role": "user", "content": "..."}]
-/// }
-fn call_claude_api(
+/// - `-p` (--print): 非対話モード。結果を stdout に出力して終了
+/// - `--model`: 使用するモデル（sonnet 等）
+/// - `--system-prompt`: システムプロンプト
+/// - `--allowedTools`: ツール不要なので空にしてCLI操作を防ぐ
+fn call_claude_cli(
     text: &str,
-    api_key: &str,
     model: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    // モデル名をCLI用に変換（config の完全名 → CLI のエイリアス対応）
+    let model_arg = normalize_model_name(model);
 
-    // リクエストボディを構築
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 4096,
-        "system": FORMAT_SYSTEM_PROMPT,
-        "messages": [
-            {
-                "role": "user",
-                "content": text
-            }
-        ]
-    });
-
-    let response = match client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-    {
-        Ok(resp) => resp,
-        Err(e) => {
-            if e.is_timeout() {
-                return Err("API タイムアウト（30秒）。テキストが長すぎる可能性があります".into());
-            } else if e.is_connect() {
-                return Err("API接続エラー。ネットワーク接続を確認してください".into());
+    let mut child = Command::new("claude")
+        .args([
+            "-p",
+            "--model", &model_arg,
+            "--system-prompt", FORMAT_SYSTEM_PROMPT,
+            "--no-session-persistence",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!("claude コマンドが見つかりません。Claude Code をインストールしてください")
             } else {
-                return Err(format!("API通信エラー: {}", e).into());
+                format!("claude コマンドの起動に失敗: {}", e)
             }
-        }
-    };
+        })?;
 
-    let status = response.status();
-    if !status.is_success() {
-        let error_body = response.text().unwrap_or_default();
-        // ステータスコード別のわかりやすいメッセージ
-        let user_msg = if error_body.contains("credit balance is too low") {
-            "クレジット残高不足。console.anthropic.com でチャージしてください"
-        } else {
-            match status.as_u16() {
-                400 => "リクエストエラー。設定を確認してください",
-                401 => "APIキーが無効です。正しいキーを設定してください",
-                403 => "APIアクセスが拒否されました。キーの権限を確認してください",
-                429 => "APIレート制限に達しました。しばらく待ってから再試行してください",
-                500..=599 => "APIサーバーエラー。しばらく待ってから再試行してください",
-                _ => "APIエラー",
-            }
-        };
-        eprintln!("[format] API エラー詳細 ({}): {}", status, error_body);
-        return Err(format!("{} ({})", user_msg, status).into());
+    // stdin にテキストを書き込んでクローズ
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())?;
+        // stdin をドロップして EOF を送信
     }
 
-    // レスポンスJSON:
-    // {
-    //   "content": [{"type": "text", "text": "..."}],
-    //   "model": "...",
-    //   "stop_reason": "end_turn",
-    //   ...
-    // }
-    let json: serde_json::Value = response.json()?;
+    // 結果を待つ
+    let output = child.wait_with_output()?;
 
-    let formatted = json
-        .get("content")
-        .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|block| block.get("text"))
-        .and_then(|t| t.as_str())
-        .ok_or("Claude API: レスポンスのパースに失敗")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
-    Ok(formatted.to_string())
+        // よくあるエラーの分類
+        let err_text = format!("{}{}", stderr, stdout);
+        let user_msg = if err_text.contains("not logged in") || err_text.contains("authentication") {
+            "Claude Code にログインしてください: claude login"
+        } else if err_text.contains("rate limit") || err_text.contains("too many") {
+            "レート制限に達しました。しばらく待ってから再試行してください"
+        } else if err_text.contains("model") && err_text.contains("not found") {
+            "指定されたモデルが見つかりません。config.json の claude_model を確認してください"
+        } else {
+            "Claude CLI でエラーが発生しました"
+        };
+
+        eprintln!("[format] Claude CLI エラー (exit={})", output.status);
+        eprintln!("[format]   stderr: {}", stderr.trim());
+        eprintln!("[format]   stdout: {}", stdout.trim());
+        return Err(format!("{}", user_msg).into());
+    }
+
+    let result = String::from_utf8(output.stdout)?;
+    let trimmed = result.trim().to_string();
+
+    if trimmed.is_empty() {
+        return Err("Claude CLI: 空の応答が返されました".into());
+    }
+
+    Ok(trimmed)
+}
+
+/// モデル名を CLI 用に正規化する
+///
+/// config.json の `claude_model` は API 用の完全名（例: "claude-sonnet-4-20250514"）
+/// だが、Claude CLI は短縮名も受け付ける（例: "sonnet"）
+/// 完全名もそのまま使えるので、基本はパススルー
+fn normalize_model_name(model: &str) -> String {
+    let m = model.trim();
+    if m.is_empty() {
+        // デフォルト: sonnet（コスパ最良）
+        "sonnet".to_string()
+    } else {
+        m.to_string()
+    }
 }

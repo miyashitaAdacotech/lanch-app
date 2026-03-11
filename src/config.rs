@@ -32,12 +32,13 @@ pub struct Config {
     /// 英語テキストの翻訳先
     pub target_lang_en: String,
 
-    // === Claude API 設定（Markdown整形用） ===
+    // === Claude 設定（Markdown整形用） ===
 
-    /// Claude API キー（Anthropic API Key）
+    /// Claude API キー（レガシー: 現在は Claude CLI 経由のため不要）
+    #[serde(default)]
     pub claude_api_key: String,
 
-    /// Claude モデル名
+    /// Claude モデル名（Claude CLI に渡すモデル指定）
     pub claude_model: String,
 
     // === UI 設定 ===

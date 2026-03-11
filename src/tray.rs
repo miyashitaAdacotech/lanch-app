@@ -369,27 +369,20 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         println!("  {}: 選択テキストをMarkdown整形", format_spec);
     }
 
-    // ANTHROPIC_API_KEY 環境変数をチェック
-    let has_env_key = std::env::var("ANTHROPIC_API_KEY")
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
-
-    if !has_env_key && config.claude_api_key.is_empty() {
-        println!();
-        println!("  ============================================");
-        println!("  ⚠ Claude APIキーが未設定です！");
-        println!("  Markdown整形（Ctrl+Shift+F）を使うには");
-        println!("  環境変数を設定してください:");
-        println!();
-        println!("  PowerShell で実行（再起動不要）:");
-        println!("    [System.Environment]::SetEnvironmentVariable(");
-        println!("      'ANTHROPIC_API_KEY', 'sk-ant-xxx', 'User')");
-        println!("    $env:ANTHROPIC_API_KEY = 'sk-ant-xxx'");
-        println!("  ============================================");
-        // 起動時にも通知を出す
-        notification::show_error("Lanch App", "Claude APIキーが未設定です。Markdown整形は使用できません。");
+    // Claude CLI の利用可能性をチェック
+    if formatter::check_cli_available() {
+        println!("  Claude CLI: 利用可能 ✓（Max Plan サブスクリプション使用）");
     } else {
-        println!("  Claude APIキー: 設定済み ✓");
+        println!();
+        println!("  ============================================");
+        println!("  ⚠ claude コマンドが見つかりません！");
+        println!("  Markdown整形（Ctrl+Shift+F）を使うには");
+        println!("  Claude Code をインストールしてください:");
+        println!();
+        println!("  npm install -g @anthropic-ai/claude-code");
+        println!("  claude login");
+        println!("  ============================================");
+        notification::show_error("Lanch App", "claude コマンドが見つかりません。Claude Code をインストールしてください。");
     }
 
     // ホットキー連打防止用タイムスタンプ
