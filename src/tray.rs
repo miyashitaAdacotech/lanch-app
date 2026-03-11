@@ -376,12 +376,20 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
     if !has_env_key && config.claude_api_key.is_empty() {
         println!();
-        println!("  ⚠ Claude APIキーが未設定です。Markdown整形を使うには:");
-        println!("    環境変数 ANTHROPIC_API_KEY を設定してください（推奨）");
-        println!("    または ~/.lanch-app/config.json の claude_api_key を設定");
+        println!("  ============================================");
+        println!("  ⚠ Claude APIキーが未設定です！");
+        println!("  Markdown整形（Ctrl+Shift+F）を使うには");
+        println!("  環境変数を設定してください:");
         println!();
-        println!("    設定方法（PowerShell・再起動不要）:");
-        println!("      [System.Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY', 'sk-ant-api03-xxxxx', 'User')");
+        println!("  PowerShell で実行（再起動不要）:");
+        println!("    [System.Environment]::SetEnvironmentVariable(");
+        println!("      'ANTHROPIC_API_KEY', 'sk-ant-xxx', 'User')");
+        println!("    $env:ANTHROPIC_API_KEY = 'sk-ant-xxx'");
+        println!("  ============================================");
+        // 起動時にも通知を出す
+        notification::show_error("Lanch App", "Claude APIキーが未設定です。Markdown整形は使用できません。");
+    } else {
+        println!("  Claude APIキー: 設定済み ✓");
     }
 
     // ホットキー連打防止用タイムスタンプ

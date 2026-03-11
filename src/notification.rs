@@ -13,14 +13,28 @@ use std::thread;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+/// PowerShell バルーン通知に安全な文字列に変換する
+///
+/// - シングルクォートをエスケープ
+/// - 改行をスペースに
+/// - 長すぎるメッセージを切り詰め（バルーン通知は約200文字が限界）
+fn sanitize_for_balloon(s: &str, max_len: usize) -> String {
+    let cleaned = s.replace('\'', "''").replace('\n', " ").replace('\r', " ");
+    if cleaned.len() > max_len {
+        format!("{}...", &cleaned[..max_len])
+    } else {
+        cleaned
+    }
+}
+
 /// バルーン通知を表示する（非同期・ノンブロッキング）
 ///
 /// PowerShell を裏で起動してシステム通知を出す。
 /// 失敗しても無視する（通知は必須機能ではないため）。
 #[cfg(windows)]
 pub fn show(title: &str, message: &str) {
-    let title = title.replace('\'', "''").replace('\n', " ");
-    let message = message.replace('\'', "''").replace('\n', " ");
+    let title = sanitize_for_balloon(title, 60);
+    let message = sanitize_for_balloon(message, 200);
 
     let script = format!(
         r#"Add-Type -AssemblyName System.Windows.Forms
@@ -54,8 +68,8 @@ pub fn show(title: &str, message: &str) {
 pub fn show_error(title: &str, message: &str) {
     #[cfg(windows)]
     {
-        let title = title.replace('\'', "''").replace('\n', " ");
-        let message = message.replace('\'', "''").replace('\n', " ");
+        let title = sanitize_for_balloon(title, 60);
+        let message = sanitize_for_balloon(message, 200);
 
         let script = format!(
             r#"Add-Type -AssemblyName System.Windows.Forms

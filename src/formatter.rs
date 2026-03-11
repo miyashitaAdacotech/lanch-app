@@ -52,11 +52,7 @@ fn resolve_api_key(config: &Config) -> Result<String, Box<dyn std::error::Error>
         return Ok(config.claude_api_key.clone());
     }
 
-    Err("Claude APIキーが未設定です。\n\
-         環境変数 ANTHROPIC_API_KEY を設定するか、\n\
-         ~/.lanch-app/config.json の claude_api_key を設定してください。\n\n\
-         設定方法（PowerShell）:\n\
-           [System.Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY', 'sk-ant-api03-xxxxx', 'User')".into())
+    Err("APIキー未設定。ANTHROPIC_API_KEY 環境変数を設定してください".into())
 }
 
 /// Claude API を使ってテキストをMarkdown整形する
@@ -115,18 +111,39 @@ fn call_claude_api(
         ]
     });
 
-    let response = client
+    let response = match client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
         .json(&body)
-        .send()?;
+        .send()
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            if e.is_timeout() {
+                return Err("API タイムアウト（30秒）。テキストが長すぎる可能性があります".into());
+            } else if e.is_connect() {
+                return Err("API接続エラー。ネットワーク接続を確認してください".into());
+            } else {
+                return Err(format!("API通信エラー: {}", e).into());
+            }
+        }
+    };
 
     let status = response.status();
     if !status.is_success() {
         let error_body = response.text().unwrap_or_default();
-        return Err(format!("Claude API エラー ({}): {}", status, error_body).into());
+        // ステータスコード別のわかりやすいメッセージ
+        let user_msg = match status.as_u16() {
+            401 => "APIキーが無効です。正しいキーを設定してください",
+            403 => "APIアクセスが拒否されました。キーの権限を確認してください",
+            429 => "APIレート制限に達しました。しばらく待ってから再試行してください",
+            500..=599 => "APIサーバーエラー。しばらく待ってから再試行してください",
+            _ => "APIエラー",
+        };
+        eprintln!("[format] API エラー詳細 ({}): {}", status, error_body);
+        return Err(format!("{} ({})", user_msg, status).into());
     }
 
     // レスポンスJSON:
