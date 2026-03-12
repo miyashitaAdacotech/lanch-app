@@ -349,6 +349,11 @@ pub fn show_clipboard_history(store: SharedStore) -> Result<(), Box<dyn std::err
             .with_always_on_top()
             .with_transparent(true)
             .with_resizable(true),
+        // 別スレッドからEventLoopを作成可能にする（tray.rsからthread::spawnで呼ばれるため）
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            builder.with_any_thread(true);
+        })),
         ..Default::default()
     };
 
