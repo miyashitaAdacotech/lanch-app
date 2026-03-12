@@ -426,7 +426,8 @@ mod tests {
     fn test_truncate_preview_newlines() {
         let text = "line1\nline2\rline3";
         let preview = truncate_preview(text, 200);
-        assert_eq!(preview, "line1 line2 line3");
+        // \n → " ", \r → "" (削除) なので "line1 line2line3"
+        assert_eq!(preview, "line1 line2line3");
         assert!(!preview.contains('\n'));
         assert!(!preview.contains('\r'));
     }

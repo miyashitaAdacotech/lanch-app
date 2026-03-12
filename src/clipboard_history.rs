@@ -517,7 +517,8 @@ mod tests {
 
     #[test]
     fn test_shared_store_type() {
-        let store = ClipboardStore::new(7);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = ClipboardStore::new_with_dir(tmp.path().to_path_buf(), 7);
         let shared: SharedStore = Arc::new(Mutex::new(store));
 
         // 複数のクローンが同じストアを参照できる
