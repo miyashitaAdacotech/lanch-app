@@ -1,15 +1,15 @@
-// main.rs - Quick Tools エントリポイント
+// main.rs - Lanch App エントリポイント
 //
 // quick-translate + Markdown整形を統合した統一ランチャー。
 //
 // 動作モード:
-//   quick-tools                          → トレイ常駐モード（デフォルト）
-//   quick-tools --popup                  → 翻訳入力ポップアップ
-//   quick-tools --popup-file <path>      → ファイルからテキストを読んでポップアップ
-//   quick-tools --translate "text"       → CLIで翻訳して標準出力
-//   quick-tools --format "text"          → CLIでMarkdown整形して標準出力
-//   quick-tools --result-file <path>     → 翻訳結果をポップアップ表示（内部用）
-//   quick-tools --format-result <path>   → 整形結果をポップアップ表示（内部用）
+//   lanch-app                          → トレイ常駐モード（デフォルト）
+//   lanch-app --popup                  → 翻訳入力ポップアップ
+//   lanch-app --popup-file <path>      → ファイルからテキストを読んでポップアップ
+//   lanch-app --translate "text"       → CLIで翻訳して標準出力
+//   lanch-app --format "text"          → CLIでMarkdown整形して標準出力
+//   lanch-app --result-file <path>     → 翻訳結果をポップアップ表示（内部用）
+//   lanch-app --format-result <path>   → 整形結果をポップアップ表示（内部用）
 
 // モジュール宣言
 mod clipboard;
@@ -121,7 +121,10 @@ impl CliArgs {
                     println!("  Ctrl+Shift+F  選択テキストをMarkdown整形（サイレント）");
                     println!();
                     println!("設定ファイル: ~/.lanch-app/config.json");
-                    println!("Claude API:   環境変数 ANTHROPIC_API_KEY を設定");
+                    println!();
+                    println!("Markdown整形（ハイブリッド方式）:");
+                    println!("  優先1: 環境変数 ANTHROPIC_API_KEY を設定 → API直接（高速 2-3秒）");
+                    println!("  優先2: Claude Code CLI (claude login) → Max Plan枠（低速 20-30秒）");
                     std::process::exit(0);
                 }
                 _ => {
