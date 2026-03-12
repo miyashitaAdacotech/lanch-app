@@ -1,73 +1,66 @@
 # lanch-app GitHub Issue 一括作成スクリプト
 #
-# 前提: gh CLI がインストール済み & ログイン済み
-#   winget install GitHub.cli
-#   gh auth login
+# gh CLI 不要。GitHub Fine-grained PAT で直接 API を叩く。
 #
 # 実行方法:
-#   cd lanch-app
+#   cd C:\Users\宮下博行\lanch-app
+#   $env:GITHUB_TOKEN = "github_pat_xxxxx"
 #   powershell -ExecutionPolicy Bypass -File scripts/create-issues.ps1
 
 $ErrorActionPreference = "Stop"
 $repo = "miyashita337/lanch-app"
+$apiBase = "https://api.github.com/repos/$repo"
 
+# --- トークン取得 ---
+$token = $env:GITHUB_TOKEN
+if (-not $token) {
+    Write-Host "ERROR: GITHUB_TOKEN 環境変数が設定されていません" -ForegroundColor Red
+    Write-Host '  $env:GITHUB_TOKEN = "github_pat_xxxxx"'
+    exit 1
+}
+
+$headers = @{
+    "Authorization" = "Bearer $token"
+    "Accept" = "application/vnd.github+json"
+    "X-GitHub-Api-Version" = "2022-11-28"
+}
+
+# --- 認証テスト ---
 Write-Host "=== lanch-app Issue 一括作成 ===" -ForegroundColor Cyan
 Write-Host "Repository: $repo"
+try {
+    $user = Invoke-RestMethod -Uri "https://api.github.com/user" -Headers $headers -Method Get
+    Write-Host "Authenticated as: $($user.login)" -ForegroundColor Green
+} catch {
+    Write-Host "ERROR: 認証に失敗しました。トークンを確認してください。" -ForegroundColor Red
+    Write-Host "  $_"
+    exit 1
+}
 Write-Host ""
 
-# gh CLI チェック
-try {
-    $null = gh --version
-} catch {
-    Write-Host "ERROR: gh CLI がインストールされていません" -ForegroundColor Red
-    Write-Host "  winget install GitHub.cli"
-    Write-Host "  gh auth login"
-    exit 1
+# --- ラベル作成（存在しなければ） ---
+$labelNames = @("enhancement", "bug", "chore")
+foreach ($label in $labelNames) {
+    try {
+        $null = Invoke-RestMethod -Uri "$apiBase/labels/$label" -Headers $headers -Method Get
+    } catch {
+        if ($_.Exception.Response.StatusCode -eq 404) {
+            try {
+                $body = @{ name = $label } | ConvertTo-Json
+                $null = Invoke-RestMethod -Uri "$apiBase/labels" -Headers $headers -Method Post -Body $body -ContentType "application/json"
+                Write-Host "  Label created: $label" -ForegroundColor Yellow
+            } catch {
+                Write-Host "  Label '$label' creation skipped" -ForegroundColor Gray
+            }
+        }
+    }
 }
 
-# 認証チェック
-$authStatus = gh auth status 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: gh にログインしていません" -ForegroundColor Red
-    Write-Host "  gh auth login"
-    exit 1
-}
-
-# --- Issue定義 ---
+# --- Issue定義（#1 README更新, #2 main.rsヘルプ更新 は完了済みのため除外） ---
 $issues = @(
     @{
-        title = "docs: README.md を Claude CLI 方式に更新"
-        labels = "documentation"
-        body = @"
-## 概要
-README.md がまだ旧 API キー方式の記述になっている。
-ハイブリッド方式（API直接 + Claude CLI フォールバック）に更新する。
-
-## やること
-- [ ] セットアップ手順を更新（ANTHROPIC_API_KEY は任意、Claude CLIフォールバック説明追加）
-- [ ] Markdown整形の動作フロー説明をハイブリッド方式に更新
-- [ ] プロジェクト構成の formatter.rs 説明を更新
-- [ ] config.json の説明で claude_model のデフォルトが haiku に変わったことを反映
-"@
-    },
-    @{
-        title = "fix: main.rs のヘルプテキストが旧方式のまま"
-        labels = "bug"
-        body = @"
-## 概要
-``lanch-app --help`` の出力にまだ「Claude API: 環境変数 ANTHROPIC_API_KEY を設定」と表示される。
-
-## 該当箇所
-src/main.rs L124
-
-## やること
-- [ ] ヘルプテキストをハイブリッド方式の説明に更新
-- [ ] 古い quick-tools の名称参照をすべて lanch-app に統一（コメント含む）
-"@
-    },
-    @{
         title = "test: ユニットテスト・結合テストの追加"
-        labels = "enhancement"
+        labels = @("enhancement")
         body = @"
 ## 概要
 現在テストが一切ない。基本的なテストを追加する。
@@ -83,7 +76,7 @@ src/main.rs L124
     },
     @{
         title = "feat: Windows ログイン時の自動起動対応"
-        labels = "enhancement"
+        labels = @("enhancement")
         body = @"
 ## 概要
 PCを起動するたびに手動で lanch-app を起動する必要がある。
@@ -96,7 +89,7 @@ PCを起動するたびに手動で lanch-app を起動する必要がある。
     },
     @{
         title = "feat: ホットキー競合時の自動代替キー提案"
-        labels = "enhancement"
+        labels = @("enhancement")
         body = @"
 ## 概要
 ホットキーが他アプリと競合した場合、警告のみで機能が無効化される。
@@ -113,7 +106,7 @@ PCを起動するたびに手動で lanch-app を起動する必要がある。
     },
     @{
         title = "improve: Windows通知を PowerShell から WinRT に移行"
-        labels = "enhancement"
+        labels = @("enhancement")
         body = @"
 ## 概要
 現在の通知はPowerShellプロセスを毎回起動する方式で約200msのオーバーヘッドがある。
@@ -126,7 +119,7 @@ PCを起動するたびに手動で lanch-app を起動する必要がある。
     },
     @{
         title = "fix: CLI モード（--format, --translate）の動作検証と修正"
-        labels = "bug"
+        labels = @("bug")
         body = @"
 ## 概要
 ``lanch-app --format "text"`` のCLIモードがハイブリッド方式移行後に正しく動作するか未検証。
@@ -140,7 +133,7 @@ PCを起動するたびに手動で lanch-app を起動する必要がある。
     },
     @{
         title = "chore: config.json から claude_api_key を段階的に廃止"
-        labels = ""
+        labels = @("chore")
         body = @"
 ## 概要
 ハイブリッド方式では ANTHROPIC_API_KEY 環境変数を直接参照するため、
@@ -159,23 +152,20 @@ $created = 0
 foreach ($issue in $issues) {
     Write-Host -NoNewline "  Creating: $($issue.title) ... "
 
-    $args = @("issue", "create", "--repo", $repo, "--title", $issue.title, "--body", $issue.body)
-    if ($issue.labels -ne "") {
-        $args += "--label"
-        $args += $issue.labels
-    }
+    $body = @{
+        title = $issue.title
+        body = $issue.body
+        labels = $issue.labels
+    } | ConvertTo-Json -Depth 3
 
     try {
-        $result = & gh @args 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "OK $result" -ForegroundColor Green
-            $created++
-        } else {
-            Write-Host "FAIL" -ForegroundColor Red
-            Write-Host "    $result" -ForegroundColor Yellow
-        }
+        $result = Invoke-RestMethod -Uri "$apiBase/issues" -Headers $headers -Method Post -Body $body -ContentType "application/json; charset=utf-8"
+        Write-Host "OK #$($result.number) $($result.html_url)" -ForegroundColor Green
+        $created++
     } catch {
-        Write-Host "ERROR: $_" -ForegroundColor Red
+        $statusCode = $_.Exception.Response.StatusCode
+        Write-Host "FAIL ($statusCode)" -ForegroundColor Red
+        Write-Host "    $_" -ForegroundColor Yellow
     }
 
     Start-Sleep -Seconds 1
