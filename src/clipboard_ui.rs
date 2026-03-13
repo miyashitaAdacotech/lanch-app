@@ -1,13 +1,15 @@
 // clipboard_ui.rs - クリップボード履歴 検索UI
 //
 // 責務:
-// - egui ポップアップで履歴を表示（検索窓 + ページャー付きリスト）
+// - egui ポップアップで履歴を表示（検索窓 + ページャー付きリスト + 詳細パネル）
 // - キーワード検索（テキスト内容 + 日付）
 // - 100件ごとのページャー（「...see more」で次のページ）
 // - 上下キーでエントリ選択、Enterでコピー&閉じる
 // - エントリ選択でクリップボードにコピー & ウィンドウを閉じる
+// - 選択中エントリの詳細表示（テキスト全文 / 画像サムネイル）
 
 use eframe::egui;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::clipboard_history::SharedStore;
@@ -15,6 +17,9 @@ use crate::clipboard_store::{ClipboardEntry, EntryType};
 
 /// 1ページあたりの表示件数
 const ITEMS_PER_PAGE: usize = 100;
+
+/// 詳細パネルのテキスト表示最大文字数
+const DETAIL_TEXT_MAX_CHARS: usize = 1000;
 
 /// クリップボード履歴ポップアップ
 pub struct ClipboardHistoryPopup {
@@ -36,6 +41,8 @@ pub struct ClipboardHistoryPopup {
     selected_entry_id: Option<String>,
     /// キーボード選択中のインデックス（-1 = 未選択 / 検索窓にフォーカス）
     selected_index: i32,
+    /// 画像テクスチャのキャッシュ (blob_file名 → TextureHandle)
+    image_cache: HashMap<String, egui::TextureHandle>,
 }
 
 impl ClipboardHistoryPopup {
@@ -52,6 +59,7 @@ impl ClipboardHistoryPopup {
             created_at: Instant::now(),
             selected_entry_id: None,
             selected_index: -1,
+            image_cache: HashMap::new(),
         };
         popup.refresh_results();
         popup
@@ -129,6 +137,181 @@ impl ClipboardHistoryPopup {
 
         false
     }
+
+    /// 選択中エントリの画像をロードしてテクスチャキャッシュに登録
+    ///
+    /// 大きな画像はデコード後にリサイズしてからテクスチャ化する。
+    /// デコード失敗時はNoneを返す（パニックしない）。
+    fn load_image_texture(&mut self, ctx: &egui::Context, blob_file: &str) -> Option<egui::TextureHandle> {
+        // キャッシュにあればそれを返す
+        if let Some(handle) = self.image_cache.get(blob_file) {
+            return Some(handle.clone());
+        }
+
+        // blobファイルからPNGデータを読み込み
+        let path = if let Ok(store) = self.store.lock() {
+            store.blob_path(blob_file)
+        } else {
+            return None;
+        };
+
+        let png_data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("[clipboard_ui] 画像ファイル読み込み失敗: {}: {}", path.display(), e);
+                return None;
+            }
+        };
+
+        let (w, h, rgba_buf) = match decode_and_resize_png(&png_data) {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("[clipboard_ui] {}: {}", blob_file, e);
+                return None;
+            }
+        };
+
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [w as usize, h as usize],
+            &rgba_buf,
+        );
+
+        let texture = ctx.load_texture(
+            format!("clipboard_img_{}", blob_file),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+
+        self.image_cache.insert(blob_file.to_string(), texture.clone());
+        Some(texture)
+    }
+
+    /// 詳細パネルを描画する
+    fn render_detail_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let hint_color = egui::Color32::from_rgb(108, 112, 134);
+        let fg_color = egui::Color32::from_rgb(205, 214, 244);
+        let accent_color = egui::Color32::from_rgb(137, 180, 250);
+
+        // 選択中のエントリを取得
+        let selected = if self.selected_index >= 0
+            && (self.selected_index as usize) < self.display_entries.len()
+        {
+            Some(self.display_entries[self.selected_index as usize].clone())
+        } else {
+            None
+        };
+
+        match selected {
+            None => {
+                // 未選択時のプレースホルダー
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() / 3.0);
+                    ui.colored_label(
+                        hint_color,
+                        egui::RichText::new("↑↓ キーでエントリを選択\n詳細がここに表示されます")
+                            .size(13.0),
+                    );
+                });
+            }
+            Some(entry) => {
+                // ヘッダー: 種別 + 日時 + サイズ
+                ui.colored_label(
+                    accent_color,
+                    egui::RichText::new(format!(
+                        "{} | {} | {}",
+                        entry.entry_type,
+                        entry.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                        format_size(entry.size_bytes),
+                    ))
+                    .size(11.0),
+                );
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                match entry.entry_type {
+                    EntryType::Text | EntryType::Json => {
+                        // テキスト内容を表示（1000文字超は切り詰め）
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                if let Some(ref text) = entry.text_content {
+                                    let display_text = if text.chars().count() > DETAIL_TEXT_MAX_CHARS {
+                                        let truncated: String = text.chars().take(DETAIL_TEXT_MAX_CHARS).collect();
+                                        format!("{}...", truncated)
+                                    } else {
+                                        text.clone()
+                                    };
+
+                                    // JSONの場合はモノスペースで表示
+                                    let text_style = if entry.entry_type == EntryType::Json {
+                                        egui::RichText::new(&display_text)
+                                            .size(12.0)
+                                            .color(fg_color)
+                                            .family(egui::FontFamily::Monospace)
+                                    } else {
+                                        egui::RichText::new(&display_text)
+                                            .size(12.0)
+                                            .color(fg_color)
+                                    };
+                                    ui.label(text_style);
+
+                                    if text.chars().count() > DETAIL_TEXT_MAX_CHARS {
+                                        ui.add_space(4.0);
+                                        ui.colored_label(
+                                            hint_color,
+                                            egui::RichText::new(format!(
+                                                "({} 文字中 {} 文字を表示)",
+                                                text.chars().count(),
+                                                DETAIL_TEXT_MAX_CHARS,
+                                            ))
+                                            .size(10.0),
+                                        );
+                                    }
+                                } else {
+                                    ui.colored_label(
+                                        hint_color,
+                                        egui::RichText::new("(テキストデータなし)").size(12.0),
+                                    );
+                                }
+                            });
+                    }
+                    EntryType::Image => {
+                        // 画像サムネイルを表示
+                        if let Some(ref blob_file) = entry.blob_file {
+                            let blob_key = blob_file.clone();
+                            if let Some(texture) = self.load_image_texture(ctx, &blob_key) {
+                                let tex_size = texture.size_vec2();
+                                let available = ui.available_size();
+                                let (dw, dh) = calculate_image_display_size(
+                                    tex_size.x, tex_size.y, available.x, available.y,
+                                );
+
+                                egui::ScrollArea::both()
+                                    .auto_shrink([false; 2])
+                                    .show(ui, |ui| {
+                                        ui.image(egui::load::SizedTexture::new(
+                                            texture.id(),
+                                            egui::vec2(dw, dh),
+                                        ));
+                                    });
+                            } else {
+                                ui.colored_label(
+                                    hint_color,
+                                    egui::RichText::new("(画像の読み込みに失敗しました)").size(12.0),
+                                );
+                            }
+                        } else {
+                            ui.colored_label(
+                                hint_color,
+                                egui::RichText::new("(画像ファイルが見つかりません)").size(12.0),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for ClipboardHistoryPopup {
@@ -170,7 +353,7 @@ impl eframe::App for ClipboardHistoryPopup {
             self.refresh_results();
         }
 
-        // --- UI ---
+        // --- カラーテーマ ---
         let bg_color = egui::Color32::from_rgb(30, 30, 46);
         let fg_color = egui::Color32::from_rgb(205, 214, 244);
         let accent_color = egui::Color32::from_rgb(137, 180, 250);
@@ -180,8 +363,10 @@ impl eframe::App for ClipboardHistoryPopup {
         let image_entry_color = egui::Color32::from_rgb(148, 226, 213);
         let border_color = egui::Color32::from_rgb(69, 71, 90);
         let hover_color = egui::Color32::from_rgb(49, 50, 68);
-        let selected_color = egui::Color32::from_rgb(69, 71, 90);
-        let selected_border_color = accent_color;
+        // 選択ハイライト: 黄色系
+        let selected_color = egui::Color32::from_rgba_premultiplied(250, 227, 80, 40);
+        let selected_border_color = egui::Color32::from_rgb(250, 227, 80);
+        let panel_divider_color = egui::Color32::from_rgb(69, 71, 90);
 
         egui::CentralPanel::default()
             .frame(
@@ -254,160 +439,196 @@ impl eframe::App for ClipboardHistoryPopup {
 
                 ui.add_space(4.0);
 
-                // スクロールエリア
+                // ===== 水平分割レイアウト: リスト(左) | 詳細パネル(右) =====
+                let available_width = ui.available_width();
+                let list_width = available_width * 0.45; // 左45%
+                let _detail_width = available_width * 0.55; // 右55%
+
                 let scroll_to_index = self.selected_index;
 
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        for (i, entry) in self.display_entries.iter().enumerate() {
-                            let is_selected = self.selected_index == i as i32;
+                ui.horizontal(|ui| {
+                    // --- 左パネル: エントリリスト ---
+                    ui.vertical(|ui| {
+                        ui.set_width(list_width);
 
-                            let (type_icon, type_color) = match entry.entry_type {
-                                EntryType::Text => ("T", text_entry_color),
-                                EntryType::Json => ("J", json_entry_color),
-                                EntryType::Image => ("I", image_entry_color),
-                            };
+                        egui::ScrollArea::vertical()
+                            .id_salt("entry_list")
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                for (i, entry) in self.display_entries.iter().enumerate() {
+                                    let is_selected = self.selected_index == i as i32;
 
-                            let time_str = entry.timestamp.format("%m/%d %H:%M").to_string();
+                                    let (type_icon, type_color) = match entry.entry_type {
+                                        EntryType::Text => ("T", text_entry_color),
+                                        EntryType::Json => ("J", json_entry_color),
+                                        EntryType::Image => ("I", image_entry_color),
+                                    };
 
-                            // エントリ行（クリック可能）
-                            let response = ui
-                                .horizontal(|ui| {
-                                    // 選択インジケーター
+                                    let time_str = entry.timestamp.format("%m/%d %H:%M").to_string();
+
+                                    // エントリ行（クリック可能）
+                                    let response = ui
+                                        .horizontal(|ui| {
+                                            // 選択インジケーター
+                                            if is_selected {
+                                                ui.colored_label(
+                                                    selected_border_color,
+                                                    egui::RichText::new("▸").size(12.0),
+                                                );
+                                            } else {
+                                                ui.add_space(14.0);
+                                            }
+
+                                            // 種別バッジ
+                                            let badge = egui::RichText::new(type_icon)
+                                                .size(10.0)
+                                                .color(egui::Color32::from_rgb(30, 30, 46))
+                                                .strong();
+                                            ui.colored_label(type_color, badge);
+                                            ui.add_space(4.0);
+
+                                            // タイムスタンプ
+                                            ui.colored_label(
+                                                hint_color,
+                                                egui::RichText::new(&time_str).size(10.0),
+                                            );
+
+                                            ui.add_space(4.0);
+
+                                            // プレビュー（折り返さず1行で）
+                                            let preview = if entry.preview.len() > 50 {
+                                                format!(
+                                                    "{}...",
+                                                    entry.preview.chars().take(50).collect::<String>()
+                                                )
+                                            } else {
+                                                entry.preview.clone()
+                                            };
+
+                                            // 選択中は太字 + 黄色テキストで表示
+                                            let text = if is_selected {
+                                                egui::RichText::new(preview)
+                                                    .size(12.0)
+                                                    .strong()
+                                                    .color(selected_border_color)
+                                            } else {
+                                                egui::RichText::new(preview)
+                                                    .size(12.0)
+                                                    .color(fg_color)
+                                            };
+                                            ui.label(text);
+                                        })
+                                        .response;
+
+                                    // 選択中 or ホバー時の背景
                                     if is_selected {
-                                        ui.colored_label(
-                                            accent_color,
-                                            egui::RichText::new("▸").size(12.0),
+                                        // 選択行: 黄色の半透明背景 + 左ボーダー
+                                        ui.painter().rect_filled(
+                                            response.rect,
+                                            2.0,
+                                            selected_color,
                                         );
-                                    } else {
-                                        ui.add_space(14.0);
+                                        // 左側に黄色のバー
+                                        let bar_rect = egui::Rect::from_min_size(
+                                            response.rect.left_top(),
+                                            egui::vec2(3.0, response.rect.height()),
+                                        );
+                                        ui.painter().rect_filled(bar_rect, 1.0, selected_border_color);
+                                    } else if response.hovered() {
+                                        ui.painter().rect_filled(
+                                            response.rect,
+                                            2.0,
+                                            hover_color,
+                                        );
                                     }
 
-                                    // 種別バッジ
-                                    let badge = egui::RichText::new(type_icon)
-                                        .size(10.0)
-                                        .color(egui::Color32::from_rgb(30, 30, 46))
-                                        .strong();
-                                    ui.colored_label(type_color, badge);
-                                    ui.add_space(4.0);
+                                    // クリックで選択（ダブルクリックでコピー）
+                                    if response.clicked() {
+                                        self.selected_index = i as i32;
+                                    }
+                                    if response.double_clicked() {
+                                        self.selected_entry_id = Some(entry.id.clone());
+                                    }
 
-                                    // タイムスタンプ
-                                    ui.colored_label(
-                                        hint_color,
-                                        egui::RichText::new(&time_str).size(10.0),
+                                    // 区切り線
+                                    ui.painter().line_segment(
+                                        [
+                                            egui::pos2(response.rect.left(), response.rect.bottom()),
+                                            egui::pos2(response.rect.right(), response.rect.bottom()),
+                                        ],
+                                        egui::Stroke::new(0.5, border_color),
                                     );
 
-                                    ui.add_space(4.0);
+                                    // キーボード選択時に自動スクロール
+                                    if is_selected && scroll_to_index >= 0 {
+                                        response.scroll_to_me(Some(egui::Align::Center));
+                                    }
+                                }
 
-                                    // プレビュー（折り返さず1行で）
-                                    let preview = if entry.preview.len() > 80 {
-                                        format!(
-                                            "{}...",
-                                            entry.preview.chars().take(80).collect::<String>()
+                                // ページャー: 「...see more」
+                                if self.has_more_pages() {
+                                    ui.add_space(8.0);
+                                    let see_more = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!(
+                                                "...see more ({} remaining)",
+                                                self.total_matches
+                                                    - (self.current_page + 1) * ITEMS_PER_PAGE
+                                            ))
+                                            .size(12.0)
+                                            .color(accent_color),
                                         )
-                                    } else {
-                                        entry.preview.clone()
-                                    };
+                                        .sense(egui::Sense::click()),
+                                    );
 
-                                    // 選択中は太字で表示
-                                    let text = if is_selected {
-                                        egui::RichText::new(preview).size(12.0).strong().color(fg_color)
-                                    } else {
-                                        egui::RichText::new(preview).size(12.0).color(fg_color)
-                                    };
-                                    ui.label(text);
-                                })
-                                .response;
+                                    if see_more.clicked() {
+                                        self.current_page += 1;
+                                        self.refresh_results();
+                                    }
 
-                            // 選択中 or ホバー時の背景
-                            if is_selected {
-                                // 選択行: 強調背景 + 左ボーダー
-                                ui.painter().rect_filled(
-                                    response.rect,
-                                    2.0,
-                                    selected_color,
-                                );
-                                // 左側にアクセントカラーのバー
-                                let bar_rect = egui::Rect::from_min_size(
-                                    response.rect.left_top(),
-                                    egui::vec2(3.0, response.rect.height()),
-                                );
-                                ui.painter().rect_filled(bar_rect, 1.0, selected_border_color);
-                            } else if response.hovered() {
-                                ui.painter().rect_filled(
-                                    response.rect,
-                                    2.0,
-                                    hover_color,
-                                );
-                            }
+                                    if see_more.hovered() {
+                                        ui.output_mut(|o| {
+                                            o.cursor_icon = egui::CursorIcon::PointingHand;
+                                        });
+                                    }
+                                }
 
-                            // クリックで選択 → コピー
-                            if response.clicked() {
-                                self.selected_entry_id = Some(entry.id.clone());
-                            }
-
-                            // 区切り線
-                            ui.painter().line_segment(
-                                [
-                                    egui::pos2(response.rect.left(), response.rect.bottom()),
-                                    egui::pos2(response.rect.right(), response.rect.bottom()),
-                                ],
-                                egui::Stroke::new(0.5, border_color),
-                            );
-
-                            // キーボード選択時に自動スクロール
-                            if is_selected && scroll_to_index >= 0 {
-                                response.scroll_to_me(Some(egui::Align::Center));
-                            }
-                        }
-
-                        // ページャー: 「...see more」
-                        if self.has_more_pages() {
-                            ui.add_space(8.0);
-                            let see_more = ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(format!(
-                                        "...see more ({} remaining)",
-                                        self.total_matches
-                                            - (self.current_page + 1) * ITEMS_PER_PAGE
-                                    ))
-                                    .size(12.0)
-                                    .color(accent_color),
-                                )
-                                .sense(egui::Sense::click()),
-                            );
-
-                            if see_more.clicked() {
-                                self.current_page += 1;
-                                self.refresh_results();
-                            }
-
-                            if see_more.hovered() {
-                                ui.output_mut(|o| {
-                                    o.cursor_icon = egui::CursorIcon::PointingHand;
-                                });
-                            }
-                        }
-
-                        // 結果なし
-                        if self.display_entries.is_empty() && !self.search_query.is_empty() {
-                            ui.add_space(20.0);
-                            ui.colored_label(
-                                hint_color,
-                                egui::RichText::new("検索結果がありません").size(14.0),
-                            );
-                        } else if self.display_entries.is_empty() {
-                            ui.add_space(20.0);
-                            ui.colored_label(
-                                hint_color,
-                                egui::RichText::new(
-                                    "クリップボード履歴はまだありません\nテキストや画像をコピーすると自動的に記録されます",
-                                )
-                                .size(13.0),
-                            );
-                        }
+                                // 結果なし
+                                if self.display_entries.is_empty() && !self.search_query.is_empty() {
+                                    ui.add_space(20.0);
+                                    ui.colored_label(
+                                        hint_color,
+                                        egui::RichText::new("検索結果がありません").size(14.0),
+                                    );
+                                } else if self.display_entries.is_empty() {
+                                    ui.add_space(20.0);
+                                    ui.colored_label(
+                                        hint_color,
+                                        egui::RichText::new(
+                                            "履歴なし\nコピーすると自動記録",
+                                        )
+                                        .size(13.0),
+                                    );
+                                }
+                            });
                     });
+
+                    // --- 中央の区切り線 ---
+                    let divider_rect = ui.available_rect_before_wrap();
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(divider_rect.left(), divider_rect.top()),
+                            egui::pos2(divider_rect.left(), divider_rect.bottom()),
+                        ],
+                        egui::Stroke::new(1.0, panel_divider_color),
+                    );
+                    ui.add_space(8.0);
+
+                    // --- 右パネル: 詳細表示 ---
+                    ui.vertical(|ui| {
+                        self.render_detail_panel(ui, ctx);
+                    });
+                });
             });
 
         // 常にリペイント（検索変更の即時反映用）
@@ -419,7 +640,7 @@ impl eframe::App for ClipboardHistoryPopup {
 pub fn show_clipboard_history(store: SharedStore) -> Result<(), Box<dyn std::error::Error>> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([600.0, 500.0])
+            .with_inner_size([1100.0, 600.0])
             .with_decorations(false)
             .with_always_on_top()
             .with_transparent(true)
@@ -444,7 +665,9 @@ pub fn show_clipboard_history(store: SharedStore) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-// --- ヘルパー ---
+// =============================================================================
+// ヘルパー関数
+// =============================================================================
 
 #[cfg(windows)]
 fn is_current_process_foreground() -> bool {
@@ -499,3 +722,353 @@ fn setup_japanese_fonts(ctx: &egui::Context) {
         }
     }
 }
+
+/// サイズを人間可読な文字列に変換
+fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// PNGデータをデコードし、大きな画像はリサイズしてRGBA8バッファを返す。
+///
+/// 戻り値: (幅, 高さ, RGBAバイト列)。デコード失敗時はErrを返す。
+fn decode_and_resize_png(png_data: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let img = image::load_from_memory_with_format(png_data, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG デコード失敗: {}", e))?;
+
+    const MAX_TEXTURE_DIM: u32 = 1024;
+    let img = if img.width() > MAX_TEXTURE_DIM || img.height() > MAX_TEXTURE_DIM {
+        img.resize(MAX_TEXTURE_DIM, MAX_TEXTURE_DIM, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+
+    if w == 0 || h == 0 {
+        return Err(format!("画像サイズが0: {}x{}", w, h));
+    }
+
+    Ok((w, h, rgba.into_raw()))
+}
+
+/// 画像の表示サイズを計算する（アスペクト比維持、利用可能領域にフィット）。
+///
+/// - `tex_w`, `tex_h`: テクスチャの元サイズ
+/// - `available_w`, `available_h`: 利用可能な描画領域（ヘッダー余白差し引き前の生値）
+///
+/// 戻り値: (表示幅, 表示高さ)。常に正の値を返す。
+fn calculate_image_display_size(tex_w: f32, tex_h: f32, available_w: f32, available_h: f32) -> (f32, f32) {
+    let avail_w = available_w.max(1.0);
+    let avail_h = (available_h - 30.0).max(1.0); // ヘッダー分の余白
+
+    let scale = (avail_w / tex_w.max(1.0)).min(avail_h / tex_h.max(1.0)).max(0.01);
+
+    (tex_w * scale, tex_h * scale)
+}
+
+// =============================================================================
+// テスト
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // format_size のユニットテスト
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_format_size_bytes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_format_size_kb() {
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+        assert_eq!(format_size(1024 * 1023), "1023.0 KB");
+    }
+
+    #[test]
+    fn test_format_size_mb() {
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+        assert_eq!(format_size(11 * 1024 * 1024), "11.0 MB");
+    }
+
+    // -------------------------------------------------------------------------
+    // calculate_image_display_size のユニットテスト
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_calc_display_size_normal_landscape() {
+        // 横長画像 800x400 を 600x400 領域に表示
+        let (w, h) = calculate_image_display_size(800.0, 400.0, 600.0, 430.0);
+        // avail_h = 430-30 = 400, scale = min(600/800, 400/400) = min(0.75, 1.0) = 0.75
+        assert!((w - 600.0).abs() < 0.1);
+        assert!((h - 300.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_calc_display_size_normal_portrait() {
+        // 縦長画像 400x800 を 600x430 領域に表示
+        let (w, h) = calculate_image_display_size(400.0, 800.0, 600.0, 430.0);
+        // avail_h = 400, scale = min(600/400, 400/800) = min(1.5, 0.5) = 0.5
+        assert!((w - 200.0).abs() < 0.1);
+        assert!((h - 400.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_calc_display_size_square() {
+        let (w, h) = calculate_image_display_size(500.0, 500.0, 300.0, 330.0);
+        // avail_h = 300, scale = min(300/500, 300/500) = 0.6
+        assert!((w - 300.0).abs() < 0.1);
+        assert!((h - 300.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_calc_display_size_negative_available_height() {
+        // BUG-1 の再現: available_h が 30 未満 → avail_h が負になっていた
+        let (w, h) = calculate_image_display_size(100.0, 100.0, 50.0, 10.0);
+        // avail_h = max(10-30, 1) = 1, avail_w = 50
+        // scale = min(50/100, 1/100) = 0.01
+        assert!(w > 0.0, "幅は正であること: {}", w);
+        assert!(h > 0.0, "高さは正であること: {}", h);
+    }
+
+    #[test]
+    fn test_calc_display_size_zero_available() {
+        let (w, h) = calculate_image_display_size(100.0, 100.0, 0.0, 0.0);
+        assert!(w > 0.0);
+        assert!(h > 0.0);
+    }
+
+    #[test]
+    fn test_calc_display_size_negative_available() {
+        let (w, h) = calculate_image_display_size(100.0, 100.0, -50.0, -20.0);
+        assert!(w > 0.0);
+        assert!(h > 0.0);
+    }
+
+    #[test]
+    fn test_calc_display_size_very_large_texture() {
+        // 巨大テクスチャを小さい領域に表示
+        let (w, h) = calculate_image_display_size(4000.0, 3000.0, 400.0, 330.0);
+        assert!(w <= 400.0 + 0.1);
+        assert!(h <= 300.0 + 0.1);
+        assert!(w > 0.0);
+        assert!(h > 0.0);
+    }
+
+    #[test]
+    fn test_calc_display_size_tiny_texture() {
+        // 1x1 テクスチャ
+        let (w, h) = calculate_image_display_size(1.0, 1.0, 600.0, 430.0);
+        assert!(w > 0.0);
+        assert!(h > 0.0);
+    }
+
+    #[test]
+    fn test_calc_display_size_zero_texture() {
+        // テクスチャサイズ 0 （ガード: max(1.0)で除算保護）
+        let (w, h) = calculate_image_display_size(0.0, 0.0, 600.0, 430.0);
+        assert!(w.is_finite());
+        assert!(h.is_finite());
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_and_resize_png のユニットテスト
+    // -------------------------------------------------------------------------
+
+    /// テスト用の最小限の有効なPNGを生成する（clipboard_historyのencode関数に依存しない）
+    fn create_test_png(width: u32, height: u32) -> Vec<u8> {
+        use image::{ImageBuffer, Rgba};
+        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(width, height, |x, y| {
+                Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])
+            });
+        let mut buf = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut buf);
+        img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+        buf
+    }
+
+    #[test]
+    fn test_decode_valid_small_png() {
+        let png = create_test_png(4, 4);
+        let result = decode_and_resize_png(&png);
+        assert!(result.is_ok());
+        let (w, h, rgba) = result.unwrap();
+        assert_eq!(w, 4);
+        assert_eq!(h, 4);
+        assert_eq!(rgba.len(), 4 * 4 * 4); // RGBA
+    }
+
+    #[test]
+    fn test_decode_1x1_png() {
+        let png = create_test_png(1, 1);
+        let (w, h, rgba) = decode_and_resize_png(&png).unwrap();
+        assert_eq!(w, 1);
+        assert_eq!(h, 1);
+        assert_eq!(rgba.len(), 4);
+    }
+
+    #[test]
+    fn test_decode_invalid_data_returns_err() {
+        let result = decode_and_resize_png(b"not a png");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("デコード失敗"));
+    }
+
+    #[test]
+    fn test_decode_empty_data_returns_err() {
+        let result = decode_and_resize_png(b"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_truncated_png_returns_err() {
+        let png = create_test_png(4, 4);
+        // PNGヘッダーだけ残して切り詰め
+        let truncated = &png[..8];
+        let result = decode_and_resize_png(truncated);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_large_image_gets_resized() {
+        // 2048x1536 → 最大辺 1024 にリサイズされるはず
+        let png = create_test_png(2048, 1536);
+        let (w, h, _) = decode_and_resize_png(&png).unwrap();
+        assert!(w <= 1024, "幅が1024以下: {}", w);
+        assert!(h <= 1024, "高さが1024以下: {}", h);
+        // アスペクト比が維持されること
+        let ratio_orig = 2048.0 / 1536.0;
+        let ratio_resized = w as f64 / h as f64;
+        assert!((ratio_orig - ratio_resized).abs() < 0.05, "アスペクト比維持: {} vs {}", ratio_orig, ratio_resized);
+    }
+
+    #[test]
+    fn test_decode_exact_1024_not_resized() {
+        let png = create_test_png(1024, 768);
+        let (w, h, _) = decode_and_resize_png(&png).unwrap();
+        assert_eq!(w, 1024);
+        assert_eq!(h, 768);
+    }
+
+    #[test]
+    fn test_decode_just_over_1024_gets_resized() {
+        let png = create_test_png(1025, 512);
+        let (w, h, _) = decode_and_resize_png(&png).unwrap();
+        assert!(w <= 1024);
+        assert!(h <= 1024);
+    }
+
+    #[test]
+    fn test_decode_rgba_buffer_size_matches() {
+        let png = create_test_png(100, 50);
+        let (w, h, rgba) = decode_and_resize_png(&png).unwrap();
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+    }
+
+    // -------------------------------------------------------------------------
+    // 結合テスト: PNGファイルの読み書き + デコード + サイズ計算の一連の流れ
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_integration_png_file_decode_and_display_size() {
+        // 1. テスト用PNGファイルを一時ディレクトリに作成
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("test_image.png");
+        let png_data = create_test_png(800, 600);
+        std::fs::write(&png_path, &png_data).unwrap();
+
+        // 2. ファイルから読み込み + デコード
+        let loaded = std::fs::read(&png_path).unwrap();
+        let (w, h, rgba) = decode_and_resize_png(&loaded).unwrap();
+        assert_eq!(w, 800);
+        assert_eq!(h, 600);
+        assert_eq!(rgba.len(), (800 * 600 * 4) as usize);
+
+        // 3. 表示サイズ計算（1100x600 のウィンドウ右55%パネル相当）
+        let (dw, dh) = calculate_image_display_size(w as f32, h as f32, 605.0, 500.0);
+        assert!(dw > 0.0 && dw <= 605.0);
+        assert!(dh > 0.0 && dh <= 470.0); // 500 - 30 = 470
+    }
+
+    #[test]
+    fn test_integration_large_png_file_resize_and_display() {
+        // 大きなPNG → リサイズ → 表示サイズ計算の一連フロー
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("large_image.png");
+        let png_data = create_test_png(2000, 1500);
+        std::fs::write(&png_path, &png_data).unwrap();
+
+        let loaded = std::fs::read(&png_path).unwrap();
+        let (w, h, rgba) = decode_and_resize_png(&loaded).unwrap();
+
+        // リサイズされて1024以下になること
+        assert!(w <= 1024);
+        assert!(h <= 1024);
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+
+        // 表示サイズは正の値
+        let (dw, dh) = calculate_image_display_size(w as f32, h as f32, 605.0, 500.0);
+        assert!(dw > 0.0);
+        assert!(dh > 0.0);
+    }
+
+    #[test]
+    fn test_integration_corrupt_file_graceful_error() {
+        // 壊れたファイル → デコードエラーが返る（パニックしない）
+        let dir = tempfile::tempdir().unwrap();
+        let corrupt_path = dir.path().join("corrupt.png");
+        std::fs::write(&corrupt_path, b"this is not a valid PNG file").unwrap();
+
+        let loaded = std::fs::read(&corrupt_path).unwrap();
+        let result = decode_and_resize_png(&loaded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_integration_missing_file_io_error() {
+        // 存在しないファイル → fs::read がエラー
+        let result = std::fs::read("/nonexistent/path/image.png");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_integration_bug1_scenario_negative_size_no_panic() {
+        // BUG-1 の再現シナリオ: 画像デコード成功 → 表示サイズ計算で負の値
+        let png = create_test_png(1920, 1080);
+        let (w, h, _) = decode_and_resize_png(&png).unwrap();
+
+        // 初期フレーム等で利用可能領域がほぼゼロのケース
+        let scenarios: Vec<(f32, f32)> = vec![
+            (0.0, 0.0),       // ゼロ
+            (-5.0, -3.0),     // 負の値
+            (10.0, 20.0),     // ヘッダー(30px)より小さい → avail_h が負になっていた
+            (1.0, 1.0),       // 極小
+            (100.0, 29.0),    // avail_h = max(29-30, 1) = 1
+            (0.5, 0.5),       // 1未満
+        ];
+
+        for (avail_w, avail_h) in scenarios {
+            let (dw, dh) = calculate_image_display_size(w as f32, h as f32, avail_w, avail_h);
+            assert!(dw > 0.0, "avail=({},{}) → dw={} は正であること", avail_w, avail_h, dw);
+            assert!(dh > 0.0, "avail=({},{}) → dh={} は正であること", avail_w, avail_h, dh);
+            assert!(dw.is_finite(), "dw は有限値であること");
+            assert!(dh.is_finite(), "dh は有限値であること");
+        }
+    }
+}
+

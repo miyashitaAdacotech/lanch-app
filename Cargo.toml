@@ -30,6 +30,9 @@ uuid = { version = "1", features = ["v4"] }
 # ウィンドウ管理（eframeの依存、any_thread設定用に明示指定）
 winit = "0.30"
 
+# 画像デコード（クリップボード履歴のサムネイル表示用）
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # システムトレイアイコン（tauri-apps製）
 tray-icon = "0.19"
 
@@ -41,6 +44,7 @@ global-hotkey = "0.7"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_System_Console",
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",

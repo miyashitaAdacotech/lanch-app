@@ -25,7 +25,6 @@ use std::thread;
 
 use crate::clipboard;
 use crate::clipboard_history;
-use crate::clipboard_ui;
 use crate::config::Config;
 use crate::formatter;
 use crate::notification;
@@ -273,7 +272,7 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // --- クリップボード履歴監視を開始 ---
-    let clipboard_store = clipboard_history::start_monitoring();
+    let _clipboard_store = clipboard_history::start_monitoring();
 
     // --- メニューの作成 ---
     let menu = Menu::new();
@@ -476,13 +475,8 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     last_history_hotkey_time = std::time::Instant::now();
-                    // 別プロセスとして履歴UIを起動
-                    let store_clone = clipboard_store.clone();
-                    thread::spawn(move || {
-                        if let Err(e) = clipboard_ui::show_clipboard_history(store_clone) {
-                            eprintln!("[clipboard_history] UI起動に失敗: {}", e);
-                        }
-                    });
+                    // 別プロセスとして履歴UIを起動（EventLoop再作成エラー回避）
+                    spawn_self(&["--clipboard-history"]);
                 }
             }
 
@@ -495,12 +489,7 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
                 } else if event.id == item_format_id {
                     handle_markdown_format(config);
                 } else if event.id == item_history_id {
-                    let store_clone = clipboard_store.clone();
-                    thread::spawn(move || {
-                        if let Err(e) = clipboard_ui::show_clipboard_history(store_clone) {
-                            eprintln!("[clipboard_history] UI起動に失敗: {}", e);
-                        }
-                    });
+                    spawn_self(&["--clipboard-history"]);
                 } else if event.id == item_quit_id {
                     return Ok(());
                 }

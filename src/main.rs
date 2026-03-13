@@ -45,6 +45,8 @@ struct CliArgs {
     engine: Option<String>,
     /// --no-tray: トレイモードを使わず直接ポップアップ
     no_tray: bool,
+    /// --clipboard-history: クリップボード履歴ポップアップ（内部用: 別プロセスで起動）
+    clipboard_history: bool,
 }
 
 impl CliArgs {
@@ -59,6 +61,7 @@ impl CliArgs {
             format_result_file: None,
             engine: None,
             no_tray: false,
+            clipboard_history: false,
         };
 
         let mut i = 0;
@@ -106,6 +109,9 @@ impl CliArgs {
                 "--no-tray" => {
                     cli.no_tray = true;
                 }
+                "--clipboard-history" => {
+                    cli.clipboard_history = true;
+                }
                 "--help" | "-h" => {
                     println!("Lanch App - 統一ランチャー (翻訳 + Markdown整形)");
                     println!();
@@ -140,7 +146,78 @@ impl CliArgs {
     }
 }
 
+/// ログファイルの初期化
+///
+/// ~/.lanch-app/lanch-app.log に eprintln! の出力をリダイレクトする。
+/// ローテーション: 2日以上前のログは自動削除。サイズが1MB超でも即ローテーション。
+fn init_logging() {
+    let log_dir = dirs::home_dir()
+        .map(|h| h.join(".lanch-app"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let _ = fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("lanch-app.log");
+    let old_path = log_dir.join("lanch-app.log.old");
+
+    // 2日以上前の .log.old は削除
+    if let Ok(meta) = fs::metadata(&old_path) {
+        if let Ok(modified) = meta.modified() {
+            if let Ok(elapsed) = modified.elapsed() {
+                if elapsed.as_secs() > 2 * 24 * 60 * 60 {
+                    let _ = fs::remove_file(&old_path);
+                }
+            }
+        }
+    }
+
+    // 現行ログが2日以上前 or 1MB超 → ローテーション（古いoldは上で消済み）
+    let should_rotate = if let Ok(meta) = fs::metadata(&log_path) {
+        let too_old = meta.modified().ok().and_then(|m| m.elapsed().ok())
+            .map(|e| e.as_secs() > 2 * 24 * 60 * 60)
+            .unwrap_or(false);
+        too_old || meta.len() > 1_000_000
+    } else {
+        false
+    };
+
+    if should_rotate {
+        let _ = fs::rename(&log_path, &old_path);
+    }
+
+    // ログファイルを追記モードで開いてstderrをリダイレクト
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::IntoRawHandle;
+        use std::fs::OpenOptions;
+
+        if let Ok(file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+            let handle = file.into_raw_handle();
+            unsafe {
+                use windows_sys::Win32::System::Threading::GetCurrentProcess;
+                use windows_sys::Win32::Foundation::HANDLE;
+
+                // SetStdHandle で stderr をログファイルに差し替え
+                // STD_ERROR_HANDLE = -12i32 as u32
+                const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
+                windows_sys::Win32::System::Console::SetStdHandle(
+                    STD_ERROR_HANDLE,
+                    handle as HANDLE,
+                );
+                let _ = GetCurrentProcess(); // suppress unused warning
+            }
+        }
+    }
+
+    // 起動ログ
+    let now = chrono::Local::now();
+    let args: Vec<String> = env::args().collect();
+    eprintln!("\n=== lanch-app started at {} ===", now.format("%Y-%m-%d %H:%M:%S"));
+    eprintln!("  args: {:?}", args);
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    init_logging();
+
     let args = CliArgs::parse();
     let mut config = config::load_config();
 
@@ -150,7 +227,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- モード分岐 ---
 
-    if let Some(text) = args.translate_text {
+    if args.clipboard_history {
+        // クリップボード履歴ポップアップ（別プロセスで起動される）
+        use std::sync::{Arc, Mutex};
+        let store = clipboard_store::ClipboardStore::new(7);
+        let shared: clipboard_history::SharedStore = Arc::new(Mutex::new(store));
+        clipboard_ui::show_clipboard_history(shared)?;
+    } else if let Some(text) = args.translate_text {
         // CLI翻訳モード
         let result = translator::translate(&text, &config)?;
         println!("{}", result.translated);
