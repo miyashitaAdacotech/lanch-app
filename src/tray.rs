@@ -160,7 +160,13 @@ fn handle_markdown_format(config: &Config) {
     }
 
     // Claude API 呼び出しはブロッキングなので別スレッドで実行
+    // スピナーを表示して処理完了を待つ
+    let done_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done_for_work = done_flag.clone();
+
     let config = config.clone();
+
+    // ワーカースレッド: 整形処理
     thread::spawn(move || {
         eprintln!("[format] Markdown整形を開始...");
 
@@ -168,6 +174,7 @@ fn handle_markdown_format(config: &Config) {
             Ok(result) => {
                 if result.formatted.is_empty() {
                     eprintln!("[format] 整形結果が空でした");
+                    done_for_work.store(true, std::sync::atomic::Ordering::SeqCst);
                     return;
                 }
 
@@ -177,10 +184,10 @@ fn handle_markdown_format(config: &Config) {
                         if let Err(e) = cb.set_text(&result.formatted) {
                             eprintln!("[format] クリップボードへのコピーに失敗: {}", e);
                             notification::show_error("Lanch App", "クリップボードへのコピーに失敗しました");
+                            done_for_work.store(true, std::sync::atomic::Ordering::SeqCst);
                             return;
                         }
                         eprintln!("[format] Markdown整形完了 → クリップボードにコピーしました");
-                        // サイレントモード: トースト通知のみ
                         notification::show("Lanch App", "Markdown整形完了 → クリップボードにコピーしました");
                     }
                     Err(e) => {
@@ -195,6 +202,12 @@ fn handle_markdown_format(config: &Config) {
                 notification::show_error("Lanch App", &msg);
             }
         }
+        done_for_work.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    // スピナースレッド: 処理中インジケーター表示
+    thread::spawn(move || {
+        crate::spinner::show_spinner(done_flag);
     });
 }
 

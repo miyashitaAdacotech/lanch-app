@@ -459,7 +459,9 @@ impl eframe::App for ClipboardHistoryPopup {
 
                 let scroll_to_index = self.selected_index;
 
-                ui.horizontal(|ui| {
+                let remaining_rect = ui.available_rect_before_wrap();
+                ui.allocate_ui_at_rect(remaining_rect, |ui| {
+                  ui.horizontal(|ui| {
                     ui.set_min_height(available_height);
 
                     // --- 左パネル: エントリリスト ---
@@ -470,6 +472,7 @@ impl eframe::App for ClipboardHistoryPopup {
                         egui::ScrollArea::vertical()
                             .id_salt("entry_list")
                             .auto_shrink([false; 2])
+                            .max_height(available_height)
                             .show(ui, |ui| {
                                 for (i, entry) in self.display_entries.iter().enumerate() {
                                     let is_selected = self.selected_index == i as i32;
@@ -645,6 +648,7 @@ impl eframe::App for ClipboardHistoryPopup {
                         ui.set_min_height(available_height);
                         self.render_detail_panel(ui, ctx);
                     });
+                });
                 });
             });
 

@@ -22,6 +22,7 @@ mod lang;
 mod notification;
 mod popup;
 mod translator;
+mod spinner;
 mod tray;
 
 use std::env;
