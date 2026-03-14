@@ -318,7 +318,8 @@ impl eframe::App for TranslatePopup {
                     .inner_margin(egui::Margin::same(16))
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                // ヘッダー（ドラッグで移動可能）
+                let header_response = ui.horizontal(|ui| {
                     ui.colored_label(
                         accent_color,
                         egui::RichText::new(format!("⚡ {}", self.current_engine.to_uppercase()))
@@ -332,7 +333,10 @@ impl eframe::App for TranslatePopup {
                             egui::RichText::new("Ctrl+Enter=コピー | Esc=閉じる").size(10.0),
                         );
                     });
-                });
+                }).response.interact(egui::Sense::drag());
+                if header_response.dragged() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
 
                 ui.add_space(8.0);
 
@@ -508,8 +512,8 @@ impl eframe::App for ResultPopup {
                     .inner_margin(egui::Margin::same(16))
             )
             .show(ctx, |ui| {
-                // モードラベル
-                ui.horizontal(|ui| {
+                // モードラベル（ドラッグで移動可能）
+                let header_response = ui.horizontal(|ui| {
                     ui.colored_label(
                         accent_color,
                         egui::RichText::new(&self.mode_label)
@@ -522,7 +526,10 @@ impl eframe::App for ResultPopup {
                             egui::RichText::new("Ctrl+Enter=コピー | Esc=閉じる").size(10.0),
                         );
                     });
-                });
+                }).response.interact(egui::Sense::drag());
+                if header_response.dragged() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
 
                 ui.add_space(6.0);
 

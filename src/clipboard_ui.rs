@@ -394,8 +394,8 @@ impl eframe::App for ClipboardHistoryPopup {
                     .inner_margin(egui::Margin::same(12)),
             )
             .show(ctx, |ui| {
-                // ヘッダー
-                ui.horizontal(|ui| {
+                // ヘッダー（ドラッグで移動可能）
+                let header_response = ui.horizontal(|ui| {
                     ui.colored_label(
                         accent_color,
                         egui::RichText::new("📋 Clipboard History").size(14.0).strong(),
@@ -411,7 +411,10 @@ impl eframe::App for ClipboardHistoryPopup {
                             egui::RichText::new(count_text).size(11.0),
                         );
                     });
-                });
+                }).response.interact(egui::Sense::drag());
+                if header_response.dragged() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
 
                 ui.add_space(8.0);
 
