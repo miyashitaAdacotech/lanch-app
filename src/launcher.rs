@@ -512,9 +512,11 @@ pub fn show_launcher(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 // === ヘルパー ===
 
 fn looks_like_url(s: &str) -> bool {
-    s.starts_with("http://")
-        || s.starts_with("https://")
-        || (s.contains('.') && !s.contains(' ') && s.len() > 4)
+    if s.starts_with("http://") || s.starts_with("https://") {
+        return true;
+    }
+    // 小数（例: 123.456）を URL と誤判定しないよう数値パース不可を条件に加える
+    s.contains('.') && !s.contains(' ') && s.len() > 4 && s.parse::<f64>().is_err()
 }
 
 fn open_url(url: &str) {
@@ -524,7 +526,11 @@ fn open_url(url: &str) {
             .args(["/C", "start", "", url])
             .spawn();
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     }
@@ -584,4 +590,34 @@ fn setup_japanese_fonts(ctx: &egui::Context) {
     }
 
     ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_looks_like_url_scheme() {
+        assert!(looks_like_url("http://example.com"));
+        assert!(looks_like_url("https://example.com"));
+    }
+
+    #[test]
+    fn test_looks_like_url_domain() {
+        assert!(looks_like_url("github.com"));
+        assert!(looks_like_url("example.co.jp"));
+    }
+
+    #[test]
+    fn test_looks_like_url_rejects_decimal() {
+        // 小数は電卓入力なので URL 扱いしない（gemini review 指摘の回帰防止）
+        assert!(!looks_like_url("123.456"));
+        assert!(!looks_like_url("0.12345"));
+    }
+
+    #[test]
+    fn test_looks_like_url_rejects_plain_text() {
+        assert!(!looks_like_url("hello world"));
+        assert!(!looks_like_url("abc"));
+    }
 }

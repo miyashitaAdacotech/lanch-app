@@ -42,12 +42,19 @@ fn show_spinner_win32(done: Arc<AtomicBool>) {
         static SPINNER_ANGLE: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
     }
 
-    unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
+    unsafe extern "system" fn wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> isize {
         match msg {
             WM_TIMER => {
                 // 完了チェック
                 let should_close = SPINNER_DONE.with(|cell| {
-                    cell.borrow().as_ref().map_or(true, |d| d.load(Ordering::SeqCst))
+                    cell.borrow()
+                        .as_ref()
+                        .map_or(true, |d| d.load(Ordering::SeqCst))
                 });
                 if should_close {
                     unsafe {
@@ -58,7 +65,9 @@ fn show_spinner_win32(done: Arc<AtomicBool>) {
                 }
                 // 角度を更新して再描画
                 SPINNER_ANGLE.with(|a| a.set(a.get() + 0.15));
-                unsafe { InvalidateRect(hwnd, std::ptr::null(), 1); }
+                unsafe {
+                    InvalidateRect(hwnd, std::ptr::null(), 1);
+                }
                 0
             }
             WM_PAINT => {
@@ -66,15 +75,21 @@ fn show_spinner_win32(done: Arc<AtomicBool>) {
                 let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
 
                 let mut rc: RECT = unsafe { std::mem::zeroed() };
-                unsafe { GetClientRect(hwnd, &mut rc); }
+                unsafe {
+                    GetClientRect(hwnd, &mut rc);
+                }
                 let cx = (rc.right / 2) as f32;
                 let cy = (rc.bottom / 2) as f32;
                 let radius = cx.min(cy) * 0.7;
 
                 // 背景
                 let bg_brush = unsafe { CreateSolidBrush(0x002E1E1E) }; // dark bg (BGR)
-                unsafe { FillRect(hdc, &rc, bg_brush); }
-                unsafe { DeleteObject(bg_brush as _); }
+                unsafe {
+                    FillRect(hdc, &rc, bg_brush);
+                }
+                unsafe {
+                    DeleteObject(bg_brush as _);
+                }
 
                 // 回転アーク
                 let angle = SPINNER_ANGLE.with(|a| a.get());
@@ -89,18 +104,35 @@ fn show_spinner_win32(done: Arc<AtomicBool>) {
                     let a0 = angle + t0 * arc_len;
                     let a1 = angle + t1 * arc_len;
                     unsafe {
-                        MoveToEx(hdc, (cx + radius * a0.cos()) as i32, (cy + radius * a0.sin()) as i32, std::ptr::null_mut());
-                        LineTo(hdc, (cx + radius * a1.cos()) as i32, (cy + radius * a1.sin()) as i32);
+                        MoveToEx(
+                            hdc,
+                            (cx + radius * a0.cos()) as i32,
+                            (cy + radius * a0.sin()) as i32,
+                            std::ptr::null_mut(),
+                        );
+                        LineTo(
+                            hdc,
+                            (cx + radius * a1.cos()) as i32,
+                            (cy + radius * a1.sin()) as i32,
+                        );
                     }
                 }
 
-                unsafe { SelectObject(hdc, old_pen); }
-                unsafe { DeleteObject(accent_pen as _); }
-                unsafe { EndPaint(hwnd, &ps); }
+                unsafe {
+                    SelectObject(hdc, old_pen);
+                }
+                unsafe {
+                    DeleteObject(accent_pen as _);
+                }
+                unsafe {
+                    EndPaint(hwnd, &ps);
+                }
                 0
             }
             WM_DESTROY => {
-                unsafe { PostQuitMessage(0); }
+                unsafe {
+                    PostQuitMessage(0);
+                }
                 0
             }
             _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
@@ -112,7 +144,11 @@ fn show_spinner_win32(done: Arc<AtomicBool>) {
     });
     SPINNER_ANGLE.with(|a| a.set(0.0));
 
-    unsafe {
+    // ウィンドウクラスはプロセス生存期間中に一度だけ登録すれば十分。
+    // 都度 RegisterClassW すると複数スピナー同時表示時にクラス名重複で失敗し、
+    // UnregisterClassW は他スレッドで実行中のスピナーに影響するため Once で一回限りにする。
+    static REGISTER_CLASS: std::sync::Once = std::sync::Once::new();
+    REGISTER_CLASS.call_once(|| unsafe {
         let h_instance = GetModuleHandleW(std::ptr::null());
         let class_name: Vec<u16> = "LanchSpinner\0".encode_utf16().collect();
 
@@ -129,6 +165,11 @@ fn show_spinner_win32(done: Arc<AtomicBool>) {
             lpszClassName: class_name.as_ptr(),
         };
         RegisterClassW(&wc);
+    });
+
+    unsafe {
+        let h_instance = GetModuleHandleW(std::ptr::null());
+        let class_name: Vec<u16> = "LanchSpinner\0".encode_utf16().collect();
 
         // カーソル位置に配置
         let (cx, cy) = cursor_position();
@@ -140,7 +181,10 @@ fn show_spinner_win32(done: Arc<AtomicBool>) {
             class_name.as_ptr(),
             std::ptr::null(),
             WS_POPUP | WS_VISIBLE,
-            x, y, SPINNER_SIZE, SPINNER_SIZE,
+            x,
+            y,
+            SPINNER_SIZE,
+            SPINNER_SIZE,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             h_instance,
@@ -165,9 +209,12 @@ fn show_spinner_win32(done: Arc<AtomicBool>) {
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             DispatchMessageW(&msg);
         }
-
-        UnregisterClassW(class_name.as_ptr(), h_instance);
     }
+
+    // スレッドローカルに残った Arc<AtomicBool> をクリアして参照カウントのリークを防ぐ
+    SPINNER_DONE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
 }
 
 /// 現在のカーソル位置を取得
@@ -177,7 +224,9 @@ fn cursor_position() -> (i32, i32) {
         use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
         let mut pt = POINT { x: 0, y: 0 };
-        unsafe { GetCursorPos(&mut pt); }
+        unsafe {
+            GetCursorPos(&mut pt);
+        }
         (pt.x, pt.y)
     }
     #[cfg(not(windows))]

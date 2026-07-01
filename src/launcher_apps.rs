@@ -19,7 +19,7 @@ pub fn scan_apps() -> Vec<AppEntry> {
     let mut entries = Vec::new();
     let dirs = start_menu_dirs();
     for dir in &dirs {
-        scan_dir(dir, &mut entries);
+        scan_dir(dir, &mut entries, 0);
     }
     // 名前でソート、重複除去
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -58,7 +58,11 @@ pub fn search(apps: &[AppEntry], query: &str, limit: usize) -> Vec<AppEntry> {
         .collect();
 
     scored.sort_by(|a, b| b.0.cmp(&a.0));
-    scored.into_iter().take(limit).map(|(_, e)| e.clone()).collect()
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, e)| e.clone())
+        .collect()
 }
 
 /// アプリを起動する
@@ -84,7 +88,10 @@ fn start_menu_dirs() -> Vec<PathBuf> {
         // ユーザーのスタートメニュー
         if let Ok(appdata) = std::env::var("APPDATA") {
             let user_start = PathBuf::from(&appdata)
-                .join("Microsoft").join("Windows").join("Start Menu").join("Programs");
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs");
             if user_start.exists() {
                 dirs.push(user_start);
             }
@@ -92,7 +99,10 @@ fn start_menu_dirs() -> Vec<PathBuf> {
         // 全ユーザーのスタートメニュー
         if let Ok(programdata) = std::env::var("PROGRAMDATA") {
             let all_start = PathBuf::from(&programdata)
-                .join("Microsoft").join("Windows").join("Start Menu").join("Programs");
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs");
             if all_start.exists() {
                 dirs.push(all_start);
             }
@@ -102,7 +112,13 @@ fn start_menu_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn scan_dir(dir: &PathBuf, out: &mut Vec<AppEntry>) {
+fn scan_dir(dir: &PathBuf, out: &mut Vec<AppEntry>, depth: usize) {
+    // Windows のジャンクション（例: "Application Data"）が親を指すと無限再帰し
+    // スタックオーバーフローでクラッシュするため、探索深さを制限する
+    if depth > 10 {
+        return;
+    }
+
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -111,7 +127,7 @@ fn scan_dir(dir: &PathBuf, out: &mut Vec<AppEntry>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            scan_dir(&path, out);
+            scan_dir(&path, out, depth + 1);
         } else if let Some(ext) = path.extension() {
             if ext.eq_ignore_ascii_case("lnk") {
                 if let Some(stem) = path.file_stem() {
@@ -139,11 +155,26 @@ mod tests {
 
     fn sample_apps() -> Vec<AppEntry> {
         vec![
-            AppEntry { name: "Google Chrome".into(), path: "C:\\chrome.lnk".into() },
-            AppEntry { name: "Visual Studio Code".into(), path: "C:\\code.lnk".into() },
-            AppEntry { name: "Windows Terminal".into(), path: "C:\\wt.lnk".into() },
-            AppEntry { name: "Notepad++".into(), path: "C:\\notepad.lnk".into() },
-            AppEntry { name: "Chrome Remote Desktop".into(), path: "C:\\crd.lnk".into() },
+            AppEntry {
+                name: "Google Chrome".into(),
+                path: "C:\\chrome.lnk".into(),
+            },
+            AppEntry {
+                name: "Visual Studio Code".into(),
+                path: "C:\\code.lnk".into(),
+            },
+            AppEntry {
+                name: "Windows Terminal".into(),
+                path: "C:\\wt.lnk".into(),
+            },
+            AppEntry {
+                name: "Notepad++".into(),
+                path: "C:\\notepad.lnk".into(),
+            },
+            AppEntry {
+                name: "Chrome Remote Desktop".into(),
+                path: "C:\\crd.lnk".into(),
+            },
         ]
     }
 

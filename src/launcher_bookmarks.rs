@@ -43,7 +43,8 @@ pub fn load_bookmarks() -> Vec<BookmarkEntry> {
             }
         }
     }
-    // 重複URL除去
+    // 重複URL除去（dedup_by は隣接する重複しか除去しないため、先に URL でソートする）
+    entries.sort_by(|a, b| a.url.cmp(&b.url));
     entries.dedup_by(|a, b| a.url == b.url);
     entries
 }
@@ -62,9 +63,9 @@ pub fn search(bookmarks: &[BookmarkEntry], query: &str, limit: usize) -> Vec<Boo
             let name_lower = entry.name.to_lowercase();
             let url_lower = entry.url.to_lowercase();
             // 全termsがname or urlのいずれかに含まれること
-            let all_match = terms.iter().all(|term| {
-                name_lower.contains(term) || url_lower.contains(term)
-            });
+            let all_match = terms
+                .iter()
+                .all(|term| name_lower.contains(term) || url_lower.contains(term));
             if !all_match {
                 return None;
             }
@@ -87,7 +88,11 @@ pub fn search(bookmarks: &[BookmarkEntry], query: &str, limit: usize) -> Vec<Boo
         .collect();
 
     scored.sort_by(|a, b| b.0.cmp(&a.0));
-    scored.into_iter().take(limit).map(|(_, e)| e.clone()).collect()
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, e)| e.clone())
+        .collect()
 }
 
 fn flatten_bookmarks(node: &BookmarkNode, out: &mut Vec<BookmarkEntry>) {
@@ -112,7 +117,10 @@ fn bookmark_paths() -> Vec<PathBuf> {
     #[cfg(windows)]
     {
         if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            let base = PathBuf::from(&local_app_data).join("Google").join("Chrome").join("User Data");
+            let base = PathBuf::from(&local_app_data)
+                .join("Google")
+                .join("Chrome")
+                .join("User Data");
             // Default profile
             let default = base.join("Default").join("Bookmarks");
             if default.exists() {
@@ -131,8 +139,7 @@ fn bookmark_paths() -> Vec<PathBuf> {
     #[cfg(not(windows))]
     {
         if let Some(home) = dirs::home_dir() {
-            let default = home
-                .join(".config/google-chrome/Default/Bookmarks");
+            let default = home.join(".config/google-chrome/Default/Bookmarks");
             if default.exists() {
                 paths.push(default);
             }
@@ -152,11 +159,26 @@ mod tests {
 
     fn sample_bookmarks() -> Vec<BookmarkEntry> {
         vec![
-            BookmarkEntry { name: "Rust Programming".into(), url: "https://www.rust-lang.org".into() },
-            BookmarkEntry { name: "GitHub".into(), url: "https://github.com".into() },
-            BookmarkEntry { name: "Rust by Example".into(), url: "https://doc.rust-lang.org/rust-by-example".into() },
-            BookmarkEntry { name: "Google".into(), url: "https://www.google.com".into() },
-            BookmarkEntry { name: "Zenn".into(), url: "https://zenn.dev".into() },
+            BookmarkEntry {
+                name: "Rust Programming".into(),
+                url: "https://www.rust-lang.org".into(),
+            },
+            BookmarkEntry {
+                name: "GitHub".into(),
+                url: "https://github.com".into(),
+            },
+            BookmarkEntry {
+                name: "Rust by Example".into(),
+                url: "https://doc.rust-lang.org/rust-by-example".into(),
+            },
+            BookmarkEntry {
+                name: "Google".into(),
+                url: "https://www.google.com".into(),
+            },
+            BookmarkEntry {
+                name: "Zenn".into(),
+                url: "https://zenn.dev".into(),
+            },
         ]
     }
 
@@ -165,7 +187,9 @@ mod tests {
         let bm = sample_bookmarks();
         let results = search(&bm, "rust", 5);
         assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|r| r.name.to_lowercase().contains("rust") || r.url.to_lowercase().contains("rust")));
+        assert!(results.iter().all(
+            |r| r.name.to_lowercase().contains("rust") || r.url.to_lowercase().contains("rust")
+        ));
     }
 
     #[test]
