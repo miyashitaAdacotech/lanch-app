@@ -101,7 +101,7 @@ impl Default for Config {
             hotkey_selected: "ctrl+shift+y".to_string(),
             hotkey_format: "ctrl+alt+f".to_string(),
             hotkey_clipboard_history: "ctrl+shift+v".to_string(),
-            hotkey_launcher: "ctrl+space".to_string(),
+            hotkey_launcher: "ctrl+alt+space".to_string(),
             launcher_shortcuts: vec![
                 LauncherShortcut {
                     key: "cc".into(),

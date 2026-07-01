@@ -343,7 +343,7 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let default_selected = "ctrl+shift+y".to_string();
     let default_format = "ctrl+alt+f".to_string();
     let default_history = "ctrl+shift+v".to_string();
-    let default_launcher = "ctrl+space".to_string();
+    let default_launcher = "ctrl+alt+space".to_string();
 
     let popup_spec = if config.hotkey_popup.trim().is_empty() {
         default_popup.as_str()
