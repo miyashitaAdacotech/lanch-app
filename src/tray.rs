@@ -15,7 +15,7 @@ use global_hotkey::{
 };
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
-    TrayIconBuilder, TrayIconEvent, Icon,
+    Icon, TrayIconBuilder, TrayIconEvent,
 };
 
 use std::env;
@@ -46,7 +46,7 @@ impl Drop for TrayInstanceGuard {
 
 #[cfg(windows)]
 fn acquire_tray_instance_lock(name: &str) -> Option<TrayInstanceGuard> {
-    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
     let mut name_wide: Vec<u16> = name.encode_utf16().collect();
@@ -111,8 +111,7 @@ fn create_icon() -> Icon {
         }
     }
 
-    Icon::from_rgba(rgba, size as u32, size as u32)
-        .expect("アイコンの作成に失敗")
+    Icon::from_rgba(rgba, size as u32, size as u32).expect("アイコンの作成に失敗")
 }
 
 /// 選択テキスト翻訳を実行する
@@ -183,16 +182,25 @@ fn handle_markdown_format(config: &Config) {
                     Ok(mut cb) => {
                         if let Err(e) = cb.set_text(&result.formatted) {
                             eprintln!("[format] クリップボードへのコピーに失敗: {}", e);
-                            notification::show_error("Lanch App", "クリップボードへのコピーに失敗しました");
+                            notification::show_error(
+                                "Lanch App",
+                                "クリップボードへのコピーに失敗しました",
+                            );
                             done_for_work.store(true, std::sync::atomic::Ordering::SeqCst);
                             return;
                         }
                         eprintln!("[format] Markdown整形完了 → クリップボードにコピーしました");
-                        notification::show("Lanch App", "Markdown整形完了 → クリップボードにコピーしました");
+                        notification::show(
+                            "Lanch App",
+                            "Markdown整形完了 → クリップボードにコピーしました",
+                        );
                     }
                     Err(e) => {
                         eprintln!("[format] クリップボードのオープンに失敗: {}", e);
-                        notification::show_error("Lanch App", "クリップボードのオープンに失敗しました");
+                        notification::show_error(
+                            "Lanch App",
+                            "クリップボードのオープンに失敗しました",
+                        );
                     }
                 }
             }
@@ -230,7 +238,11 @@ fn parse_hotkey(spec: &str) -> Option<HotKey> {
     let mut modifiers = Modifiers::empty();
     let mut key_code: Option<Code> = None;
 
-    for part in normalized.split('+').map(str::trim).filter(|p| !p.is_empty()) {
+    for part in normalized
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
         match part {
             "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
             "shift" => modifiers |= Modifiers::SHIFT,
@@ -261,6 +273,7 @@ fn parse_hotkey(spec: &str) -> Option<HotKey> {
             "x" => key_code = Some(Code::KeyX),
             "y" => key_code = Some(Code::KeyY),
             "z" => key_code = Some(Code::KeyZ),
+            "space" => key_code = Some(Code::Space),
             _ => return None,
         }
     }
@@ -293,23 +306,27 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let selected_label = format!("選択テキスト翻訳 ({})", config.hotkey_selected);
     let format_label = format!("Markdown整形 ({})", config.hotkey_format);
     let history_label = format!("クリップボード履歴 ({})", config.hotkey_clipboard_history);
+    let launcher_label = format!("ランチャー ({})", config.hotkey_launcher);
 
     let item_popup = MenuItem::new(&popup_label, true, None);
     let item_selected = MenuItem::new(&selected_label, true, None);
     let item_format = MenuItem::new(&format_label, true, None);
     let item_history = MenuItem::new(&history_label, true, None);
+    let item_launcher = MenuItem::new(&launcher_label, true, None);
     let item_quit = MenuItem::new("終了", true, None);
 
     menu.append(&item_popup)?;
     menu.append(&item_selected)?;
     menu.append(&item_format)?;
     menu.append(&item_history)?;
+    menu.append(&item_launcher)?;
     menu.append(&item_quit)?;
 
     let item_popup_id = item_popup.id().clone();
     let item_selected_id = item_selected.id().clone();
     let item_format_id = item_format.id().clone();
     let item_history_id = item_history.id().clone();
+    let item_launcher_id = item_launcher.id().clone();
     let item_quit_id = item_quit.id().clone();
 
     // --- トレイアイコンの作成 ---
@@ -324,8 +341,9 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
     let default_popup = "ctrl+shift+t".to_string();
     let default_selected = "ctrl+shift+y".to_string();
-    let default_format = "ctrl+shift+f".to_string();
+    let default_format = "ctrl+alt+f".to_string();
     let default_history = "ctrl+shift+v".to_string();
+    let default_launcher = "ctrl+space".to_string();
 
     let popup_spec = if config.hotkey_popup.trim().is_empty() {
         default_popup.as_str()
@@ -359,39 +377,80 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| format!("Markdown整形ホットキーの形式が不正です: {}", format_spec))?;
     let hk_history = parse_hotkey(history_spec)
         .or_else(|| parse_hotkey(&default_history))
-        .ok_or_else(|| format!("クリップボード履歴ホットキーの形式が不正です: {}", history_spec))?;
+        .ok_or_else(|| {
+            format!(
+                "クリップボード履歴ホットキーの形式が不正です: {}",
+                history_spec
+            )
+        })?;
+
+    let launcher_spec = if config.hotkey_launcher.trim().is_empty() {
+        default_launcher.as_str()
+    } else {
+        config.hotkey_launcher.as_str()
+    };
+    let hk_launcher = parse_hotkey(launcher_spec)
+        .or_else(|| parse_hotkey(&default_launcher))
+        .ok_or_else(|| format!("ランチャーホットキーの形式が不正です: {}", launcher_spec))?;
 
     // ホットキー登録（競合時はスキップして警告）
     let popup_registered = match hotkey_manager.register(hk_popup) {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}", popup_spec, e);
+            eprintln!(
+                "  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}",
+                popup_spec, e
+            );
             false
         }
     };
     let selected_registered = match hotkey_manager.register(hk_selected) {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}", selected_spec, e);
+            eprintln!(
+                "  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}",
+                selected_spec, e
+            );
             false
         }
     };
     let format_registered = match hotkey_manager.register(hk_format) {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}", format_spec, e);
+            eprintln!(
+                "  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}",
+                format_spec, e
+            );
             false
         }
     };
     let history_registered = match hotkey_manager.register(hk_history) {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}", history_spec, e);
+            eprintln!(
+                "  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}",
+                history_spec, e
+            );
+            false
+        }
+    };
+    let launcher_registered = match hotkey_manager.register(hk_launcher) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!(
+                "  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}",
+                launcher_spec, e
+            );
             false
         }
     };
 
-    if !popup_registered && !selected_registered && !format_registered && !history_registered {
+    if !popup_registered
+        && !selected_registered
+        && !format_registered
+        && !history_registered
+        && !launcher_registered
+    {
         return Err("全てのホットキーの登録に失敗しました。他のアプリ（quick_translate.ahk 等）を終了してから再起動してください".into());
     }
 
@@ -407,6 +466,9 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     }
     if history_registered {
         println!("  {}: クリップボード履歴を開く", history_spec);
+    }
+    if launcher_registered {
+        println!("  {}: ランチャーを開く", launcher_spec);
     }
     println!("  📋 クリップボード監視: 有効（最大7日間保持）");
 
@@ -431,18 +493,22 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             println!("    npm install -g @anthropic-ai/claude-code");
             println!("    claude login");
             println!("  ============================================");
-            notification::show_error("Lanch App", "Markdown整形が利用できません。設定方法はコンソールを確認してください。");
+            notification::show_error(
+                "Lanch App",
+                "Markdown整形が利用できません。設定方法はコンソールを確認してください。",
+            );
         }
     }
 
     // ホットキー連打防止用タイムスタンプ
-    let mut last_popup_hotkey_time =
-        std::time::Instant::now() - std::time::Duration::from_secs(10);
+    let mut last_popup_hotkey_time = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut last_selected_hotkey_time =
         std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut last_format_hotkey_time =
         std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut last_history_hotkey_time =
+        std::time::Instant::now() - std::time::Duration::from_secs(10);
+    let mut last_launcher_hotkey_time =
         std::time::Instant::now() - std::time::Duration::from_secs(10);
 
     // --- Windows メッセージループ ---
@@ -490,6 +556,12 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
                     last_history_hotkey_time = std::time::Instant::now();
                     // 別プロセスとして履歴UIを起動（EventLoop再作成エラー回避）
                     spawn_self(&["--clipboard-history"]);
+                } else if event.id == hk_launcher.id() {
+                    if last_launcher_hotkey_time.elapsed().as_millis() < 500 {
+                        continue;
+                    }
+                    last_launcher_hotkey_time = std::time::Instant::now();
+                    spawn_self(&["--launcher"]);
                 }
             }
 
@@ -503,6 +575,8 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
                     handle_markdown_format(config);
                 } else if event.id == item_history_id {
                     spawn_self(&["--clipboard-history"]);
+                } else if event.id == item_launcher_id {
+                    spawn_self(&["--launcher"]);
                 } else if event.id == item_quit_id {
                     return Ok(());
                 }

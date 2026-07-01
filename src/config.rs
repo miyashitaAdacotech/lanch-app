@@ -16,7 +16,6 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct Config {
     // === 翻訳設定 ===
-
     /// 翻訳エンジン: "google" または "deepl"
     pub engine: String,
 
@@ -33,7 +32,6 @@ pub struct Config {
     pub target_lang_en: String,
 
     // === Claude 設定（Markdown整形用） ===
-
     /// Claude API キー（レガシー: 現在は Claude CLI 経由のため不要）
     #[serde(default)]
     pub claude_api_key: String,
@@ -42,7 +40,6 @@ pub struct Config {
     pub claude_model: String,
 
     // === UI 設定 ===
-
     /// フォントサイズ
     pub font_size: f32,
 
@@ -53,7 +50,6 @@ pub struct Config {
     pub log_enabled: bool,
 
     // === ホットキー設定 ===
-
     /// ポップアップ起動のホットキー
     pub hotkey_popup: String,
 
@@ -65,6 +61,27 @@ pub struct Config {
 
     /// クリップボード履歴のホットキー
     pub hotkey_clipboard_history: String,
+
+    // === ランチャー設定 ===
+    /// ランチャーのホットキー
+    pub hotkey_launcher: String,
+
+    /// ランチャーショートカット定義
+    pub launcher_shortcuts: Vec<LauncherShortcut>,
+}
+
+/// ランチャーのショートカット定義
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LauncherShortcut {
+    /// ショートカットキー（例: "cc"）
+    pub key: String,
+    /// 表示名
+    pub name: String,
+    /// 実行コマンド
+    pub command: String,
+    /// コマンド引数
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 impl Default for Config {
@@ -82,8 +99,37 @@ impl Default for Config {
             log_enabled: true,
             hotkey_popup: "ctrl+shift+t".to_string(),
             hotkey_selected: "ctrl+shift+y".to_string(),
-            hotkey_format: "ctrl+shift+f".to_string(),
+            hotkey_format: "ctrl+alt+f".to_string(),
             hotkey_clipboard_history: "ctrl+shift+v".to_string(),
+            hotkey_launcher: "ctrl+space".to_string(),
+            launcher_shortcuts: vec![
+                LauncherShortcut {
+                    key: "cc".into(),
+                    name: "Claude Code".into(),
+                    command: "cmd".into(),
+                    args: vec![
+                        "/C".into(),
+                        "start".into(),
+                        "".into(),
+                        "cmd".into(),
+                        "/K".into(),
+                        "claude".into(),
+                    ],
+                },
+                LauncherShortcut {
+                    key: "cd".into(),
+                    name: "Codex".into(),
+                    command: "cmd".into(),
+                    args: vec![
+                        "/C".into(),
+                        "start".into(),
+                        "".into(),
+                        "cmd".into(),
+                        "/K".into(),
+                        "codex".into(),
+                    ],
+                },
+            ],
         }
     }
 }
@@ -110,14 +156,12 @@ pub fn load_config() -> Config {
 
     if path.exists() {
         match fs::read_to_string(&path) {
-            Ok(contents) => {
-                match serde_json::from_str(&contents) {
-                    Ok(config) => return config,
-                    Err(e) => {
-                        eprintln!("設定ファイルのパースに失敗: {}", e);
-                    }
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(config) => return config,
+                Err(e) => {
+                    eprintln!("設定ファイルのパースに失敗: {}", e);
                 }
-            }
+            },
             Err(e) => {
                 eprintln!("設定ファイルの読み込みに失敗: {}", e);
             }
@@ -133,7 +177,9 @@ pub fn load_config() -> Config {
 
 /// quick-translate の設定を読み込んでマイグレーションする
 fn migrate_from_quick_translate() -> Option<Config> {
-    let old_path = dirs::home_dir()?.join(".quick-translate").join("config.json");
+    let old_path = dirs::home_dir()?
+        .join(".quick-translate")
+        .join("config.json");
 
     if !old_path.exists() {
         return None;
@@ -216,7 +262,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.hotkey_popup, "ctrl+shift+t");
         assert_eq!(config.hotkey_selected, "ctrl+shift+y");
-        assert_eq!(config.hotkey_format, "ctrl+shift+f");
+        assert_eq!(config.hotkey_format, "ctrl+alt+f");
         assert_eq!(config.hotkey_clipboard_history, "ctrl+shift+v");
     }
 
@@ -240,7 +286,10 @@ mod tests {
         assert_eq!(deserialized.hotkey_popup, config.hotkey_popup);
         assert_eq!(deserialized.claude_model, config.claude_model);
         assert_eq!(deserialized.font_size, config.font_size);
-        assert_eq!(deserialized.hotkey_clipboard_history, config.hotkey_clipboard_history);
+        assert_eq!(
+            deserialized.hotkey_clipboard_history,
+            config.hotkey_clipboard_history
+        );
     }
 
     #[test]

@@ -22,6 +22,11 @@ mod lang;
 mod notification;
 mod popup;
 mod translator;
+mod launcher;
+mod launcher_apps;
+mod launcher_bookmarks;
+mod launcher_calc;
+mod launcher_history;
 mod spinner;
 mod tray;
 
@@ -48,6 +53,8 @@ struct CliArgs {
     no_tray: bool,
     /// --clipboard-history: クリップボード履歴ポップアップ（内部用: 別プロセスで起動）
     clipboard_history: bool,
+    /// --launcher: ランチャーポップアップ（内部用: 別プロセスで起動）
+    launcher: bool,
 }
 
 impl CliArgs {
@@ -63,6 +70,7 @@ impl CliArgs {
             engine: None,
             no_tray: false,
             clipboard_history: false,
+            launcher: false,
         };
 
         let mut i = 0;
@@ -112,6 +120,9 @@ impl CliArgs {
                 }
                 "--clipboard-history" => {
                     cli.clipboard_history = true;
+                }
+                "--launcher" => {
+                    cli.launcher = true;
                 }
                 "--help" | "-h" => {
                     println!("Lanch App - 統一ランチャー (翻訳 + Markdown整形)");
@@ -228,7 +239,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- モード分岐 ---
 
-    if args.clipboard_history {
+    if args.launcher {
+        // ランチャーポップアップ（別プロセスで起動される）
+        launcher::show_launcher(config)?;
+    } else if args.clipboard_history {
         // クリップボード履歴ポップアップ（別プロセスで起動される）
         use std::sync::{Arc, Mutex};
         let store = clipboard_store::ClipboardStore::new(7);
