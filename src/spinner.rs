@@ -202,7 +202,16 @@ fn show_spinner_win32(done: Arc<AtomicBool>) {
         let rgn = CreateRoundRectRgn(0, 0, SPINNER_SIZE, SPINNER_SIZE, 8, 8);
         SetWindowRgn(hwnd, rgn, 1);
 
-        SetTimer(hwnd, TIMER_ID, FRAME_MS, None);
+        // WM_TIMER が唯一の再描画・終了経路。SetTimer が失敗すると最前面ウィンドウが
+        // 残り続けるため、失敗時はウィンドウを破棄して表示せず抜ける。
+        if SetTimer(hwnd, TIMER_ID, FRAME_MS, None) == 0 {
+            eprintln!("[spinner] SetTimer 失敗、スピナーを表示しません");
+            DestroyWindow(hwnd);
+            SPINNER_DONE.with(|cell| {
+                *cell.borrow_mut() = None;
+            });
+            return;
+        }
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
         let mut msg: MSG = std::mem::zeroed();

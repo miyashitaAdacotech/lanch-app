@@ -43,9 +43,10 @@ pub fn load_bookmarks() -> Vec<BookmarkEntry> {
             }
         }
     }
-    // 重複URL除去（dedup_by は隣接する重複しか除去しないため、先に URL でソートする）
-    entries.sort_by(|a, b| a.url.cmp(&b.url));
-    entries.dedup_by(|a, b| a.url == b.url);
+    // 重複URL除去（挿入順を保ったまま、プロファイル間の重複も除去する）
+    // dedup_by は隣接要素しか除去できないため HashSet で全体の重複を弾く
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|e| seen.insert(e.url.clone()));
     entries
 }
 

@@ -520,19 +520,11 @@ fn looks_like_url(s: &str) -> bool {
 }
 
 fn open_url(url: &str) {
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(url).spawn();
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    // cmd.exe 経由（cmd /C start）だと URL 中の `&` 等がコマンド区切りとして再解釈され、
+    // クエリ付き URL の破損やコマンド注入につながる。ShellExecute 相当を安全に扱う
+    // `open` crate に委ねる（Windows/macOS/Linux を横断で正しく処理）。
+    if let Err(e) = open::that(url) {
+        eprintln!("[launcher] URL を開けませんでした ({}): {}", url, e);
     }
 }
 
@@ -554,10 +546,12 @@ fn urlencoded(s: &str) -> String {
 }
 
 fn truncate_url(url: &str, max_len: usize) -> String {
-    if url.len() <= max_len {
+    // バイト単位スライスは UTF-8 のマルチバイト境界で panic するため、char 単位で切り詰める
+    if url.chars().count() <= max_len {
         url.to_string()
     } else {
-        format!("{}...", &url[..max_len])
+        let truncated: String = url.chars().take(max_len).collect();
+        format!("{}...", truncated)
     }
 }
 

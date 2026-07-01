@@ -30,6 +30,9 @@ uuid = { version = "1", features = ["v4"] }
 # ウィンドウ管理（eframeの依存、any_thread設定用に明示指定）
 winit = "0.30"
 
+# URL/ファイルを既定アプリで開く（cmd.exe を介さず ShellExecute 相当で安全に起動）
+open = "5"
+
 # 画像デコード（クリップボード履歴のサムネイル表示用）
 image = { version = "0.25", default-features = false, features = ["png"] }
 
