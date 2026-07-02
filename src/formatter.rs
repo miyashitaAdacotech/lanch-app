@@ -12,8 +12,17 @@
 //   3. 整形結果をクリップボードにコピー
 
 use crate::config::Config;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// Claude CLI 呼び出しのタイムアウト（秒）。
+/// Max Plan 経由の CLI は API 直接より遅いため、API 側（30秒）より長めに取る。
+/// ハングを無制限にしない Fail-Fast の歯止め。
+const CLI_TIMEOUT_SECS: u64 = 90;
+
+// タイムアウト値の妥当性をコンパイル時に保証する（API の 30 秒以上、かつ現実的な上限）。
+const _: () = assert!(CLI_TIMEOUT_SECS >= 30 && CLI_TIMEOUT_SECS <= 300);
 
 /// 整形結果を格納する構造体
 #[derive(Debug, Clone)]
@@ -94,7 +103,10 @@ pub fn check_cli_available() -> bool {
 ///
 /// ANTHROPIC_API_KEY が設定されていれば高速な API 直接呼び出し、
 /// なければ Claude CLI フォールバック。
-pub fn format_markdown(text: &str, config: &Config) -> Result<FormatResult, Box<dyn std::error::Error>> {
+pub fn format_markdown(
+    text: &str,
+    config: &Config,
+) -> Result<FormatResult, Box<dyn std::error::Error>> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(FormatResult {
@@ -111,7 +123,8 @@ pub fn format_markdown(text: &str, config: &Config) -> Result<FormatResult, Box<
         Backend::None => {
             return Err("Markdown整形を利用するには:\n\
                 ① ANTHROPIC_API_KEY 環境変数を設定（高速）\n\
-                ② または Claude Code をインストール（claude login）".into());
+                ② または Claude Code をインストール（claude login）"
+                .into());
         }
     };
 
@@ -123,12 +136,9 @@ pub fn format_markdown(text: &str, config: &Config) -> Result<FormatResult, Box<
 // ============================================================
 
 /// Anthropic Messages API を直接呼び出す
-fn call_api_direct(
-    text: &str,
-    config: &Config,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "ANTHROPIC_API_KEY が未設定です")?;
+fn call_api_direct(text: &str, config: &Config) -> Result<String, Box<dyn std::error::Error>> {
+    let api_key =
+        std::env::var("ANTHROPIC_API_KEY").map_err(|_| "ANTHROPIC_API_KEY が未設定です")?;
 
     // Markdown整形は単純タスク → Haiku で十分（高速＆安価）
     let model = if config.claude_model.is_empty() {
@@ -210,20 +220,40 @@ fn call_api_direct(
 // バックエンド B: Claude Code CLI 経由（Max Plan 枠）
 // ============================================================
 
+/// claude -p に渡す引数リストを組み立てる（純粋関数、テスト可能に分離）。
+///
+/// `--setting-sources project` で user グローバル設定（フック / MCP サーバー）を
+/// ロードしないようにする。これと隔離した作業ディレクトリ（`call_claude_cli` 側で
+/// `current_dir` に指定）を併用することで、アプリの CWD が Claude Code プロジェクトでも
+/// CLAUDE.md / SessionStart フック / MCP 群を巻き込まず、整形タスクの乗っ取り・ハングを防ぐ。
+/// OAuth 認証は設定ソースに依存しないため、Max Plan 枠のまま動作する。
+fn build_cli_args(model_arg: &str) -> Vec<&str> {
+    vec![
+        "-p",
+        "--model",
+        model_arg,
+        "--system-prompt",
+        FORMAT_SYSTEM_PROMPT,
+        "--setting-sources",
+        "project",
+        "--no-session-persistence",
+    ]
+}
+
 /// Claude Code CLI を呼び出してテキストを整形する
-fn call_claude_cli(
-    text: &str,
-    model: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
+fn call_claude_cli(text: &str, model: &str) -> Result<String, Box<dyn std::error::Error>> {
     let model_arg = normalize_model_name(model);
 
+    // claude -p を「プロジェクトを持たない専用ディレクトリ」で実行する。
+    // アプリの作業ディレクトリが Claude Code プロジェクト（CLAUDE.md / .claude/settings.json /
+    // SessionStart フック / MCP サーバー）だと、それらを毎回ロードして整形タスクを乗っ取り、
+    // 会話応答を返したり数分ハングする。作業ディレクトリを隔離することで防ぐ。
+    let isolated_dir = std::env::temp_dir().join("lanch-app-fmt");
+    let _ = std::fs::create_dir_all(&isolated_dir);
+
     let mut child = Command::new("claude")
-        .args([
-            "-p",
-            "--model", &model_arg,
-            "--system-prompt", FORMAT_SYSTEM_PROMPT,
-            "--no-session-persistence",
-        ])
+        .args(build_cli_args(&model_arg))
+        .current_dir(&isolated_dir)
         // ANTHROPIC_API_KEY が設定されていると Claude CLI が
         // Max Plan ではなく API キーを使ってしまうため、明示的に除外
         .env_remove("ANTHROPIC_API_KEY")
@@ -233,7 +263,8 @@ fn call_claude_cli(
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                "claude コマンドが見つかりません。Claude Code をインストールしてください".to_string()
+                "claude コマンドが見つかりません。Claude Code をインストールしてください"
+                    .to_string()
             } else {
                 format!("claude コマンドの起動に失敗: {}", e)
             }
@@ -244,14 +275,60 @@ fn call_claude_cli(
         stdin.write_all(text.as_bytes())?;
     }
 
-    let output = child.wait_with_output()?;
+    // stdout / stderr はパイプバッファが詰まると子プロセスがブロックしてデッドロックするため、
+    // それぞれ別スレッドで最後まで読み切る。読み切りをスレッドに逃がすことで、本スレッドは
+    // try_wait でデッドラインを監視し、タイムアウト時に kill できる。
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = stdout_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = stderr_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    // デッドライン監視（Fail-Fast: ハングを無制限にしない。API 経路のタイムアウトと対を成す）
+    let deadline = Instant::now() + Duration::from_secs(CLI_TIMEOUT_SECS);
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    eprintln!(
+                        "[format] CLI タイムアウト（{}秒）: プロセスを強制終了しました",
+                        CLI_TIMEOUT_SECS
+                    );
+                    return Err(format!(
+                        "Claude CLI タイムアウト（{}秒）。再試行してください",
+                        CLI_TIMEOUT_SECS
+                    )
+                    .into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    };
 
-        let err_text = format!("{}{}", stderr, stdout);
-        let user_msg = if err_text.contains("not logged in") || err_text.contains("authentication") {
+    let stdout = out_handle.join().unwrap_or_default();
+    let stderr = err_handle.join().unwrap_or_default();
+
+    if !status.success() {
+        let stderr_s = String::from_utf8_lossy(&stderr);
+        let stdout_s = String::from_utf8_lossy(&stdout);
+
+        let err_text = format!("{}{}", stderr_s, stdout_s);
+        let user_msg = if err_text.contains("not logged in") || err_text.contains("authentication")
+        {
             "Claude Code にログインしてください: claude login"
         } else if err_text.contains("rate limit") || err_text.contains("too many") {
             "レート制限。しばらく待ってから再試行してください"
@@ -261,13 +338,13 @@ fn call_claude_cli(
             "Claude CLI でエラーが発生しました"
         };
 
-        eprintln!("[format] CLI エラー (exit={})", output.status);
-        eprintln!("[format]   stderr: {}", stderr.trim());
-        eprintln!("[format]   stdout: {}", stdout.trim());
+        eprintln!("[format] CLI エラー (exit={})", status);
+        eprintln!("[format]   stderr: {}", stderr_s.trim());
+        eprintln!("[format]   stdout: {}", stdout_s.trim());
         return Err(user_msg.into());
     }
 
-    let result = String::from_utf8(output.stdout)?;
+    let result = String::from_utf8(stdout)?;
     let trimmed = result.trim().to_string();
 
     if trimmed.is_empty() {
@@ -419,5 +496,35 @@ mod tests {
         assert!(FORMAT_SYSTEM_PROMPT.contains("Markdown"));
         assert!(FORMAT_SYSTEM_PROMPT.contains("コードブロック"));
         assert!(FORMAT_SYSTEM_PROMPT.contains("テーブル"));
+    }
+
+    // --- build_cli_args のテスト（プロジェクト文脈の混入・ハング防止の回帰ガード） ---
+
+    #[test]
+    fn test_build_cli_args_isolates_from_project_context() {
+        let args = build_cli_args("haiku");
+        // user グローバル設定（フック / MCP）をロードしない指定が必ず含まれること。
+        // これが欠けると CWD がプロジェクトのとき CLAUDE.md / SessionStart フック /
+        // MCP 群を巻き込み、整形タスクの乗っ取り・数分ハングが再発する。
+        let pos = args
+            .iter()
+            .position(|a| *a == "--setting-sources")
+            .expect("--setting-sources フラグが必要");
+        assert_eq!(args.get(pos + 1), Some(&"project"));
+    }
+
+    #[test]
+    fn test_build_cli_args_contains_required_flags() {
+        let args = build_cli_args("claude-haiku-4-5-20251001");
+        assert!(args.contains(&"-p"));
+        assert!(args.contains(&"--no-session-persistence"));
+        // 渡したモデル名が引数列に含まれること
+        let pos = args
+            .iter()
+            .position(|a| *a == "--model")
+            .expect("--model フラグが必要");
+        assert_eq!(args.get(pos + 1), Some(&"claude-haiku-4-5-20251001"));
+        // システムプロンプトが引数列に含まれること
+        assert!(args.contains(&FORMAT_SYSTEM_PROMPT));
     }
 }
