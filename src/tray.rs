@@ -151,6 +151,16 @@ impl Drop for FormatGuard {
     }
 }
 
+/// done フラグを drop 時に必ず true にする RAII ガード。
+/// ワーカースレッドが panic・早期 return しても確実にスピナーを終了させ、
+/// スピナースレッドのリーク（SPINNER_ACTIVE が立ちっぱなし）を防ぐ。
+struct DoneGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for DoneGuard {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// 選択テキストをMarkdown整形する（サイレントモード）
 ///
 /// 1. Ctrl+C シミュレーション → クリップボードから読み取り
@@ -192,13 +202,14 @@ fn handle_markdown_format(config: &Config) {
     thread::spawn(move || {
         // 整形完了（成功/失敗いずれも）まで排他フラグを保持し、スレッド終了時に解除する
         let _guard = guard;
+        // panic・早期 return も含め、スレッド終了時に必ず done を true にしてスピナーを閉じる
+        let _done_guard = DoneGuard(done_for_work);
         eprintln!("[format] Markdown整形を開始...");
 
         match formatter::format_markdown(&text, &config) {
             Ok(result) => {
                 if result.formatted.is_empty() {
                     eprintln!("[format] 整形結果が空でした");
-                    done_for_work.store(true, std::sync::atomic::Ordering::SeqCst);
                     return;
                 }
 
@@ -211,7 +222,6 @@ fn handle_markdown_format(config: &Config) {
                                 "Lanch App",
                                 "クリップボードへのコピーに失敗しました",
                             );
-                            done_for_work.store(true, std::sync::atomic::Ordering::SeqCst);
                             return;
                         }
                         eprintln!("[format] Markdown整形完了 → クリップボードにコピーしました");
@@ -235,7 +245,6 @@ fn handle_markdown_format(config: &Config) {
                 notification::show_error("Lanch App", &msg);
             }
         }
-        done_for_work.store(true, std::sync::atomic::Ordering::SeqCst);
     });
 
     // スピナースレッド: 処理中インジケーター表示

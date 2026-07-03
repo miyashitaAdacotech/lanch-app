@@ -240,11 +240,22 @@ fn build_cli_args(model_arg: &str) -> Vec<&str> {
     ]
 }
 
+/// CLI 整形に使うユーザー専用の作業ディレクトリを返す。
+///
+/// 共有 temp（Windows の `%TEMP%`、この環境では `C:\temp`／Unix の `/tmp`）を使うと、
+/// 他ユーザーが事前に同名ディレクトリを作り、悪意ある CLAUDE.md や設定を仕込んで
+/// `claude` の動作を乗っ取れる（CWE-377）。`--setting-sources project` でも CLAUDE.md の
+/// 自動探索は防げないため、CWD・ログともユーザー専用の LOCALAPPDATA 配下に固定する。
+fn fmt_work_dir() -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("lanch-app")
+        .join("fmt")
+}
+
 /// CLI 整形の診断ログを追記するファイルパスを返す
 fn diagnostic_log_path() -> std::path::PathBuf {
-    std::env::temp_dir()
-        .join("lanch-app-fmt")
-        .join("format-diagnostic.log")
+    fmt_work_dir().join("format-diagnostic.log")
 }
 
 /// CLI 整形の診断情報をログファイルに追記する。
@@ -295,7 +306,8 @@ fn call_claude_cli(text: &str, model: &str) -> Result<String, Box<dyn std::error
     // アプリの作業ディレクトリが Claude Code プロジェクト（CLAUDE.md / .claude/settings.json /
     // SessionStart フック / MCP サーバー）だと、それらを毎回ロードして整形タスクを乗っ取り、
     // 会話応答を返したり数分ハングする。作業ディレクトリを隔離することで防ぐ。
-    let isolated_dir = std::env::temp_dir().join("lanch-app-fmt");
+    // 共有 temp ではなくユーザー専用ディレクトリを使う（CWE-377 回避、fmt_work_dir 参照）。
+    let isolated_dir = fmt_work_dir();
     let _ = std::fs::create_dir_all(&isolated_dir);
 
     append_diagnostic(&format!(
@@ -325,14 +337,11 @@ fn call_claude_cli(text: &str, model: &str) -> Result<String, Box<dyn std::error
             }
         })?;
 
-    // stdin にテキストを書き込んでクローズ
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes())?;
-    }
-
     // stdout / stderr はパイプバッファが詰まると子プロセスがブロックしてデッドロックするため、
-    // それぞれ別スレッドで最後まで読み切る。読み切りをスレッドに逃がすことで、本スレッドは
-    // try_wait でデッドラインを監視し、タイムアウト時に kill できる。
+    // それぞれ別スレッドで最後まで読み切る。
+    // 重要: reader スレッドは stdin への write_all より「先に」起動する。write_all 中に子が
+    // 出力を始めてパイプが詰まると、親は stdin で・子は stdout/stderr で相互待ちになりうるため。
+    // 読み切りをスレッドに逃がすことで、本スレッドは try_wait でデッドラインを監視し kill できる。
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
     let out_handle = std::thread::spawn(move || {
@@ -349,6 +358,11 @@ fn call_claude_cli(text: &str, model: &str) -> Result<String, Box<dyn std::error
         }
         buf
     });
+
+    // reader 起動後に stdin へ書き込んでクローズ（drop で EOF）
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())?;
+    }
 
     // デッドライン監視（Fail-Fast: ハングを無制限にしない。API 経路のタイムアウトと対を成す）
     let deadline = Instant::now() + Duration::from_secs(CLI_TIMEOUT_SECS);
