@@ -240,6 +240,53 @@ fn build_cli_args(model_arg: &str) -> Vec<&str> {
     ]
 }
 
+/// CLI 整形の診断ログを追記するファイルパスを返す
+fn diagnostic_log_path() -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("lanch-app-fmt")
+        .join("format-diagnostic.log")
+}
+
+/// CLI 整形の診断情報をログファイルに追記する。
+///
+/// アプリは GUI（windows subsystem）プロセスのため `eprintln!` の出力先が無く、
+/// 失敗原因を追えない。失敗時に exit code / stderr / stdout をファイルへ残すことで、
+/// 実機での再現時に真の原因を確認できるようにする（可観測性）。
+fn append_diagnostic(entry: &str) {
+    use std::io::Write as _;
+    let path = diagnostic_log_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "[{ts}] {entry}");
+    }
+}
+
+/// CLI の stderr/stdout からユーザー向けエラーメッセージを分類する（純粋関数、テスト可能）
+fn classify_cli_error(err_text: &str) -> &'static str {
+    let lower = err_text.to_lowercase();
+    if lower.contains("not logged in") || lower.contains("authentication") {
+        "Claude Code にログインしてください: claude login"
+    } else if lower.contains("retired")
+        || lower.contains("may not exist")
+        || lower.contains("issue with the selected model")
+    {
+        "モデルが無効です（引退済み等）。設定の claude_model を最新モデルに変更してください"
+    } else if lower.contains("rate limit") || lower.contains("too many") {
+        "レート制限。しばらく待ってから再試行してください"
+    } else if lower.contains("credit balance") {
+        "CLI経由でもクレジット不足。claude login で正しいアカウントにログインしてください"
+    } else {
+        "Claude CLI でエラーが発生しました"
+    }
+}
+
 /// Claude Code CLI を呼び出してテキストを整形する
 fn call_claude_cli(text: &str, model: &str) -> Result<String, Box<dyn std::error::Error>> {
     let model_arg = normalize_model_name(model);
@@ -250,6 +297,13 @@ fn call_claude_cli(text: &str, model: &str) -> Result<String, Box<dyn std::error
     // 会話応答を返したり数分ハングする。作業ディレクトリを隔離することで防ぐ。
     let isolated_dir = std::env::temp_dir().join("lanch-app-fmt");
     let _ = std::fs::create_dir_all(&isolated_dir);
+
+    append_diagnostic(&format!(
+        "CLI呼び出し開始 model={} cwd={} PATH_has_local_bin={}",
+        model_arg,
+        isolated_dir.display(),
+        std::env::var("PATH").unwrap_or_default().contains(".local")
+    ));
 
     let mut child = Command::new("claude")
         .args(build_cli_args(&model_arg))
@@ -262,6 +316,7 @@ fn call_claude_cli(text: &str, model: &str) -> Result<String, Box<dyn std::error
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
+            append_diagnostic(&format!("spawn失敗 kind={:?} err={}", e.kind(), e));
             if e.kind() == std::io::ErrorKind::NotFound {
                 "claude コマンドが見つかりません。Claude Code をインストールしてください"
                     .to_string()
@@ -304,6 +359,7 @@ fn call_claude_cli(text: &str, model: &str) -> Result<String, Box<dyn std::error
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    append_diagnostic(&format!("タイムアウト {}秒でkill", CLI_TIMEOUT_SECS));
                     eprintln!(
                         "[format] CLI タイムアウト（{}秒）: プロセスを強制終了しました",
                         CLI_TIMEOUT_SECS
@@ -327,17 +383,14 @@ fn call_claude_cli(text: &str, model: &str) -> Result<String, Box<dyn std::error
         let stdout_s = String::from_utf8_lossy(&stdout);
 
         let err_text = format!("{}{}", stderr_s, stdout_s);
-        let user_msg = if err_text.contains("not logged in") || err_text.contains("authentication")
-        {
-            "Claude Code にログインしてください: claude login"
-        } else if err_text.contains("rate limit") || err_text.contains("too many") {
-            "レート制限。しばらく待ってから再試行してください"
-        } else if err_text.contains("credit balance") {
-            "CLI経由でもクレジット不足。claude login で正しいアカウントにログインしてください"
-        } else {
-            "Claude CLI でエラーが発生しました"
-        };
+        let user_msg = classify_cli_error(&err_text);
 
+        append_diagnostic(&format!(
+            "非ゼロ終了 exit={} stderr=[{}] stdout=[{}]",
+            status,
+            stderr_s.trim(),
+            stdout_s.trim().chars().take(500).collect::<String>()
+        ));
         eprintln!("[format] CLI エラー (exit={})", status);
         eprintln!("[format]   stderr: {}", stderr_s.trim());
         eprintln!("[format]   stdout: {}", stdout_s.trim());
@@ -348,9 +401,11 @@ fn call_claude_cli(text: &str, model: &str) -> Result<String, Box<dyn std::error
     let trimmed = result.trim().to_string();
 
     if trimmed.is_empty() {
+        append_diagnostic("空の応答（exit=0 だが stdout が空）");
         return Err("Claude CLI: 空の応答が返されました".into());
     }
 
+    append_diagnostic(&format!("成功 len={}", trimmed.len()));
     Ok(trimmed)
 }
 
@@ -511,6 +566,44 @@ mod tests {
             .position(|a| *a == "--setting-sources")
             .expect("--setting-sources フラグが必要");
         assert_eq!(args.get(pos + 1), Some(&"project"));
+    }
+
+    // --- classify_cli_error のテスト（引退モデル等のエラー分類の回帰ガード） ---
+
+    #[test]
+    fn test_classify_cli_error_retired_model() {
+        // 実際に発生した引退モデルの CLI 出力（claude-sonnet-4-20250514）
+        let err = "⚠ Claude Sonnet 4 was retired on June 15, 2026. \
+            There's an issue with the selected model (claude-sonnet-4-20250514). \
+            It may not exist or you may not have access to it.";
+        assert_eq!(
+            classify_cli_error(err),
+            "モデルが無効です（引退済み等）。設定の claude_model を最新モデルに変更してください"
+        );
+    }
+
+    #[test]
+    fn test_classify_cli_error_not_logged_in() {
+        assert_eq!(
+            classify_cli_error("Not logged in · Please run /login"),
+            "Claude Code にログインしてください: claude login"
+        );
+    }
+
+    #[test]
+    fn test_classify_cli_error_rate_limit() {
+        assert_eq!(
+            classify_cli_error("Error: rate limit exceeded"),
+            "レート制限。しばらく待ってから再試行してください"
+        );
+    }
+
+    #[test]
+    fn test_classify_cli_error_generic_fallback() {
+        assert_eq!(
+            classify_cli_error("some unknown failure"),
+            "Claude CLI でエラーが発生しました"
+        );
     }
 
     #[test]

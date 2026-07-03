@@ -15,7 +15,7 @@ use global_hotkey::{
 };
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
-    TrayIconBuilder, TrayIconEvent, Icon,
+    Icon, TrayIconBuilder, TrayIconEvent,
 };
 
 use std::env;
@@ -46,7 +46,7 @@ impl Drop for TrayInstanceGuard {
 
 #[cfg(windows)]
 fn acquire_tray_instance_lock(name: &str) -> Option<TrayInstanceGuard> {
-    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
     let mut name_wide: Vec<u16> = name.encode_utf16().collect();
@@ -111,8 +111,7 @@ fn create_icon() -> Icon {
         }
     }
 
-    Icon::from_rgba(rgba, size as u32, size as u32)
-        .expect("アイコンの作成に失敗")
+    Icon::from_rgba(rgba, size as u32, size as u32).expect("アイコンの作成に失敗")
 }
 
 /// 選択テキスト翻訳を実行する
@@ -139,6 +138,19 @@ fn handle_selected_translation() {
     spawn_self(&["--popup"]);
 }
 
+/// 整形処理が実行中かどうか（連打で重い claude プロセスを多重起動させないための排他フラグ）
+static FORMAT_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// FORMAT_IN_PROGRESS を drop 時に必ず解除する RAII ガード。
+/// 早期 return・ワーカースレッド完了のどの経路でも取りこぼさず解除する。
+struct FormatGuard;
+impl Drop for FormatGuard {
+    fn drop(&mut self) {
+        FORMAT_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// 選択テキストをMarkdown整形する（サイレントモード）
 ///
 /// 1. Ctrl+C シミュレーション → クリップボードから読み取り
@@ -146,6 +158,16 @@ fn handle_selected_translation() {
 /// 3. 結果をクリップボードにコピー
 /// 4. トースト通知のみ表示（ポップアップなし）
 fn handle_markdown_format(config: &Config) {
+    // 既に整形中なら無視する。claude CLI は 5〜7 秒かかる重いプロセスで、
+    // 連打すると多重起動して IO/CPU が詰まるため、常に 1 つだけに制限する。
+    if FORMAT_IN_PROGRESS.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        eprintln!("[format] 既に整形処理中のためスキップ");
+        return;
+    }
+    // 以降のどの return でも drop で FORMAT_IN_PROGRESS を解除する。
+    // ワーカースレッド起動時はこのガードをスレッドへ move し、整形完了まで保持する。
+    let guard = FormatGuard;
+
     let text = match clipboard::copy_selected_text() {
         Some(t) => t,
         None => {
@@ -168,6 +190,8 @@ fn handle_markdown_format(config: &Config) {
 
     // ワーカースレッド: 整形処理
     thread::spawn(move || {
+        // 整形完了（成功/失敗いずれも）まで排他フラグを保持し、スレッド終了時に解除する
+        let _guard = guard;
         eprintln!("[format] Markdown整形を開始...");
 
         match formatter::format_markdown(&text, &config) {
@@ -183,16 +207,25 @@ fn handle_markdown_format(config: &Config) {
                     Ok(mut cb) => {
                         if let Err(e) = cb.set_text(&result.formatted) {
                             eprintln!("[format] クリップボードへのコピーに失敗: {}", e);
-                            notification::show_error("Lanch App", "クリップボードへのコピーに失敗しました");
+                            notification::show_error(
+                                "Lanch App",
+                                "クリップボードへのコピーに失敗しました",
+                            );
                             done_for_work.store(true, std::sync::atomic::Ordering::SeqCst);
                             return;
                         }
                         eprintln!("[format] Markdown整形完了 → クリップボードにコピーしました");
-                        notification::show("Lanch App", "Markdown整形完了 → クリップボードにコピーしました");
+                        notification::show(
+                            "Lanch App",
+                            "Markdown整形完了 → クリップボードにコピーしました",
+                        );
                     }
                     Err(e) => {
                         eprintln!("[format] クリップボードのオープンに失敗: {}", e);
-                        notification::show_error("Lanch App", "クリップボードのオープンに失敗しました");
+                        notification::show_error(
+                            "Lanch App",
+                            "クリップボードのオープンに失敗しました",
+                        );
                     }
                 }
             }
@@ -230,7 +263,11 @@ fn parse_hotkey(spec: &str) -> Option<HotKey> {
     let mut modifiers = Modifiers::empty();
     let mut key_code: Option<Code> = None;
 
-    for part in normalized.split('+').map(str::trim).filter(|p| !p.is_empty()) {
+    for part in normalized
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
         match part {
             "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
             "shift" => modifiers |= Modifiers::SHIFT,
@@ -359,34 +396,51 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| format!("Markdown整形ホットキーの形式が不正です: {}", format_spec))?;
     let hk_history = parse_hotkey(history_spec)
         .or_else(|| parse_hotkey(&default_history))
-        .ok_or_else(|| format!("クリップボード履歴ホットキーの形式が不正です: {}", history_spec))?;
+        .ok_or_else(|| {
+            format!(
+                "クリップボード履歴ホットキーの形式が不正です: {}",
+                history_spec
+            )
+        })?;
 
     // ホットキー登録（競合時はスキップして警告）
     let popup_registered = match hotkey_manager.register(hk_popup) {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}", popup_spec, e);
+            eprintln!(
+                "  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}",
+                popup_spec, e
+            );
             false
         }
     };
     let selected_registered = match hotkey_manager.register(hk_selected) {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}", selected_spec, e);
+            eprintln!(
+                "  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}",
+                selected_spec, e
+            );
             false
         }
     };
     let format_registered = match hotkey_manager.register(hk_format) {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}", format_spec, e);
+            eprintln!(
+                "  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}",
+                format_spec, e
+            );
             false
         }
     };
     let history_registered = match hotkey_manager.register(hk_history) {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}", history_spec, e);
+            eprintln!(
+                "  ⚠ {} の登録に失敗（他アプリと競合の可能性）: {}",
+                history_spec, e
+            );
             false
         }
     };
@@ -431,13 +485,15 @@ pub fn run_tray(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             println!("    npm install -g @anthropic-ai/claude-code");
             println!("    claude login");
             println!("  ============================================");
-            notification::show_error("Lanch App", "Markdown整形が利用できません。設定方法はコンソールを確認してください。");
+            notification::show_error(
+                "Lanch App",
+                "Markdown整形が利用できません。設定方法はコンソールを確認してください。",
+            );
         }
     }
 
     // ホットキー連打防止用タイムスタンプ
-    let mut last_popup_hotkey_time =
-        std::time::Instant::now() - std::time::Duration::from_secs(10);
+    let mut last_popup_hotkey_time = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut last_selected_hotkey_time =
         std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut last_format_hotkey_time =
