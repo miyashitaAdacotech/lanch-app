@@ -246,7 +246,53 @@ fn smart_wrap_text(text: &str) -> String {
     wrapped.join("\n")
 }
 
+/// HTTP ステータスから利用者向けのヒントを作る
+fn google_status_hint(status: reqwest::StatusCode) -> &'static str {
+    match status.as_u16() {
+        429 => "Google に自動リクエストとして一時ブロックされています。時間をおくか、config.json の engine を \"deepl\" に切り替えてください",
+        403 => "Google にアクセスを拒否されました。ネットワーク（プロキシ/VPN）を確認してください",
+        _ => "Google 翻訳エンドポイントがエラーを返しました",
+    }
+}
+
+/// エラー表示用に本文の先頭だけを 1 行へ切り詰める
+fn body_snippet(body: &str) -> String {
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.chars().take(120).collect()
+}
+
+/// Google 翻訳のレスポンス JSON から訳文を取り出す
+///
+/// `[["訳文", "en"]]` 形式が基本だが、長文が分割されて
+/// `[["前半", "en"], ["後半", "en"]]` になる場合もあるため全要素を連結する。
+fn extract_google_translation(json: &serde_json::Value) -> String {
+    let Some(items) = json.as_array() else {
+        return String::new();
+    };
+
+    let mut result = String::new();
+    for item in items {
+        match item {
+            serde_json::Value::String(s) => result.push_str(s),
+            serde_json::Value::Array(inner) => {
+                if let Some(s) = inner.first().and_then(|v| v.as_str()) {
+                    result.push_str(s);
+                }
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
 /// Google翻訳の無料APIを使って翻訳する
+///
+/// 旧エンドポイント `translate.googleapis.com/translate_a/single?client=gtx` は
+/// bot 判定で HTTP 429 + HTML（"automated queries"）を返すようになり、
+/// JSON パースが reqwest の "error decoding response body" で失敗していた。
+/// Chrome の翻訳拡張が使う `clients5.google.com/translate_a/t?client=dict-chrome-ex`
+/// は同じ条件で 200 + JSON を返すため、そちらを使う。
+/// 長文で URL 長の上限に当たらないよう、本文は POST ボディで送る。
 fn google_translate(
     text: &str,
     target: &str,
@@ -255,26 +301,31 @@ fn google_translate(
     let client = reqwest::blocking::Client::new();
 
     let response = client
-        .get("https://translate.googleapis.com/translate_a/single")
+        .post("https://clients5.google.com/translate_a/t")
         .query(&[
-            ("client", "gtx"),
+            ("client", "dict-chrome-ex"),
             ("sl", source),
             ("tl", target),
-            ("dt", "t"),
-            ("q", text),
         ])
+        .form(&[("q", text)])
         .send()?;
 
-    let json: serde_json::Value = response.json()?;
+    let status = response.status();
+    let body = response.text()?;
 
-    let mut result = String::new();
-    if let Some(sentences) = json.get(0).and_then(|v| v.as_array()) {
-        for sentence in sentences {
-            if let Some(translated) = sentence.get(0).and_then(|v| v.as_str()) {
-                result.push_str(translated);
-            }
-        }
+    if !status.is_success() {
+        return Err(format!("Google翻訳エラー ({}): {}", status, google_status_hint(status)).into());
     }
+
+    let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        format!(
+            "Google翻訳: 応答を解析できませんでした ({}): {}",
+            e,
+            body_snippet(&body)
+        )
+    })?;
+
+    let result = extract_google_translation(&json);
 
     if result.is_empty() {
         Err("翻訳結果を取得できませんでした".into())
@@ -356,4 +407,71 @@ pub fn translate(text: &str, config: &Config) -> Result<TranslationResult, Box<d
         translated,
         target_lang: target,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_google_translation_single_entry() {
+        // clients5 の基本形: [["訳文", "検出元言語"]]
+        let json: serde_json::Value =
+            serde_json::from_str(r#"[["こんにちは世界","en"]]"#).unwrap();
+        assert_eq!(extract_google_translation(&json), "こんにちは世界");
+    }
+
+    #[test]
+    fn test_extract_google_translation_multiple_entries() {
+        let json: serde_json::Value =
+            serde_json::from_str(r#"[["前半。","en"],["後半。","en"]]"#).unwrap();
+        assert_eq!(extract_google_translation(&json), "前半。後半。");
+    }
+
+    #[test]
+    fn test_extract_google_translation_flat_strings() {
+        let json: serde_json::Value = serde_json::from_str(r#"["訳文","en"]"#).unwrap();
+        assert_eq!(extract_google_translation(&json), "訳文en");
+    }
+
+    #[test]
+    fn test_extract_google_translation_unexpected_shape() {
+        let json: serde_json::Value = serde_json::from_str(r#"{"error":"blocked"}"#).unwrap();
+        assert_eq!(extract_google_translation(&json), "");
+    }
+
+    #[test]
+    fn test_google_status_hint_mentions_deepl_on_429() {
+        let hint = google_status_hint(reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert!(hint.contains("deepl"));
+    }
+
+    #[test]
+    fn test_body_snippet_flattens_and_truncates() {
+        let body = "<html>\n  <title>Sorry...</title>\n</html>";
+        let snippet = body_snippet(body);
+        assert!(!snippet.contains('\n'));
+        assert!(snippet.starts_with("<html> <title>Sorry..."));
+
+        let long = "a".repeat(500);
+        assert_eq!(body_snippet(&long).chars().count(), 120);
+    }
+
+    /// 実ネットワークを使う疎通確認（既定ではスキップ）
+    ///
+    /// `cargo test -- --ignored` で実行し、Google 側のエンドポイント仕様変更を検知する。
+    #[test]
+    #[ignore = "ネットワーク接続が必要"]
+    fn test_google_translate_live() {
+        let out = google_translate("Hello world", "ja", "auto").expect("翻訳に失敗");
+        assert!(!out.is_empty());
+        assert!(crate::lang::is_japanese(&out), "訳文が日本語ではない: {}", out);
+    }
+
+    #[test]
+    fn test_reflow_keeps_existing_line_breaks() {
+        // 新エンドポイントは改行を保持して返すため、再配分せずそのまま使う
+        let out = reflow_by_source_lines("Hello.\nWorld.", "こんにちは。\n世界。");
+        assert_eq!(out, "こんにちは。\n世界。");
+    }
 }
